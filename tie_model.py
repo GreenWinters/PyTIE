@@ -103,8 +103,8 @@ def load_data(device):
     test_ratio = 0.2
 
     # data locations
-    dataset_filepath = "technique_inference_engine/data/combined_dataset_full_frequency.json"
-    enterprise_attack_filepath = "technique_inference_engine/data/stix/enterprise-attack.json"
+    dataset_filepath = "data/combined_dataset_full_frequency.json"
+    enterprise_attack_filepath = "data/stix/enterprise-attack.json"
     # make data
     data_builder = ReportTechniqueMatrixBuilder(
         combined_dataset_filepath=dataset_filepath,
