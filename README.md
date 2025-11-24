@@ -100,22 +100,10 @@ Compared to the original MITRE Engenuity Center for Threat-Informed Defense repo
 - **Error handling and progress feedback:** Robust error handling, progress print statements, and device compatibility checks.
 
 
-<<<<<<< HEAD
-Please submit
-[issues](https://github.com/center-for-threat-informed-defense/technique-inference-engine/issues) for
-any technical questions/concerns or contact
-[ctid@mitre.org](mailto:ctid@mitre.org?subject=subject=Question%20about%20technique-inference-engine)
-directly for more general inquiries.
-=======
->>>>>>> 8ce08fe (Your commit message)
 
 ### Model Extraction Utility
 
-<<<<<<< HEAD
-Copyright 2024 MITRE. Approved for public release. Document number CT0124.
-=======
 The `tie_model_extractor.py` script automates extraction of annotated TIE model code from Jupyter notebooks. It clones the TIE repository, checks out the correct branch, and extracts code cells with markdown annotations for integration and documentation. To achieve the same functionality as the altered files in this repository, additional changes may be required to the outputted files, such as updating model and data handling for GPU compatibility, integrating robust error handling and progress feedback, and ensuring outputs are saved in the enhanced formats (timestamped JSON, CSV) with expanded metrics and CLI options as described above.
->>>>>>> 8ce08fe (Your commit message)
 
 
 
