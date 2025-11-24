@@ -1,0 +1,50 @@
+[tool.poetry]
+name = "technique-inference-engine"
+version = "1.0.0"
+description = "The goal of the Technique Inference Engine (TIE) project is to, given a small set of observed MITRE ATT&CK techniques, predict the next most likely techniques."
+authors = ["Center for Threat-Informed Defense <ctid@mitre-engenuity.org>"]
+packages = [{ include = "tie", from = "src" }]
+license = "Apache"
+
+[tool.poetry.dependencies]
+python = ">=3.10, <3.12"
+mitreattack-python = "^3.0.2"
+scikit-learn = "^1.4.1.post1"
+matplotlib = "^3.8.3"
+ipykernel = "^6.29.4"
+implicit = "^0.7.2"
+tensorflow = "2.16.1"
+pre-commit = "^3.7.1"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.3.3"
+bandit = "1.7.0"
+bumpver = "^2022.1119"
+pytest = "^7.1.2"
+pytest-cov = "2.11.1"
+safety = "1.10.3"
+mypy = "^1.2.0"
+jupyter = "^1.1.1"
+
+[tool.poetry.scripts]
+export-tie = "tie.cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.bumpver]
+current_version = "v1.0.0"
+version_pattern = "vMAJOR.MINOR.PATCH"
+commit_message = "Bump version {old_version} -> {new_version}"
+commit = true
+tag = true
+
+[tool.bumpver.file_patterns]
+# pep440_version does not have the "v" prefix
+"pyproject.toml" = ['version = "{pep440_version}"']
+"src/tie/__init__.py" = ['version = "{pep440_version}"']
+
+[tool.ruff]
+line-length = 88
+lint.select = ["E", "F", "W", "I"]
