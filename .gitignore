@@ -10,5 +10,5 @@ docs/_build/
 .DS_Store
 .pre-commit-config.yaml
 .vscode/
-tests
+tests/
 .github
