@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from mitreattack.stix20 import MitreAttackData
 
-from tie.constants import PredictionMethod
+from .constants import PredictionMethod
 
 
 def get_mitre_technique_ids_to_names(stix_filepath: str) -> dict[str, str]:

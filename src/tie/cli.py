@@ -3,10 +3,10 @@ import os
 
 import numpy as np
 
-from tie.constants import PredictionMethod
-from tie.engine import TechniqueInferenceEngine
-from tie.matrix_builder import ReportTechniqueMatrixBuilder
-from tie.recommender import WalsRecommender
+from .constants import PredictionMethod
+from .engine import TechniqueInferenceEngine
+from .matrix_builder import ReportTechniqueMatrixBuilder
+from .recommender import WalsRecommender
 
 
 def export_model(dataset_filepath: str, enterprise_attack_filepath: str, outfile: str):

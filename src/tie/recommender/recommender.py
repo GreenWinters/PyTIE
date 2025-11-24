@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 import numpy as np
-import tensorflow as tf
+import torch
 
 
 class Recommender(ABC):
@@ -20,7 +20,7 @@ class Recommender(ABC):
     @abstractmethod
     def fit(
         self,
-        data: tf.SparseTensor,
+        data,
         **kwargs,
     ):
         """Fits the model to data.
@@ -33,7 +33,7 @@ class Recommender(ABC):
         """
 
     @abstractmethod
-    def evaluate(self, test_data: tf.SparseTensor, **kwargs) -> float:
+    def evaluate(self, test_data, **kwargs) -> float:
         """Evaluates the solution.
 
         Requires that the model has been trained.
@@ -62,7 +62,7 @@ class Recommender(ABC):
     @abstractmethod
     def predict_new_entity(
         self,
-        entity: tf.SparseTensor,
+        entity,
         **kwargs,
     ) -> np.array:
         """Recommends items to an unseen entity.
