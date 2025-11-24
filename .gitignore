@@ -7,7 +7,8 @@ coverage.xml
 docs/_build/
 .mypy_cache/
 *.tmp
-TODO*
 .DS_Store
 .pre-commit-config.yaml
 .vscode/
+tests
+.github

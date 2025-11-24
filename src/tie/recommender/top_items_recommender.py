@@ -1,40 +1,55 @@
+'''
+Top Items Recommender 
+
+
+Modified by: @GreenWinters
+Based on original code from: https://github.com/center-for-threat-informed-defense/technique-inference-engine
+Significant changes made for research/development purposes.
+See LICENSE and README for details.
+'''
 import numpy as np
-import tensorflow as tf
+import torch
 from sklearn.metrics import mean_squared_error
 
 from .recommender import Recommender
 
 
 class TopItemsRecommender(Recommender):
-    """A recommender model which always recommends the most observed techniques.
+    """
+    A recommender model which always recommends the most observed techniques.
 
     A recommender model which always recommends the most observed techniques in the
     dataset in frequency order.
+
+    Abstraction function:
+       AF(m, n, item_frequencies) = a recommender model which recommends the n
+           items in order of frequency according to item_frequencies
+           for each of the m entities
+    
+    Rep invariant:
+       - m > 0
+       - n > 0
+       - item_frequencies.shape == (n,)
+       - 0 <= item_frequencies[i] <= n-1 for all 0 <= i < n
+    
+    Safety from rep exposure:
+       - m and n are private and immutable
+       - item_frequency is private and never returned
     """
-
-    # Abstraction function:
-    #   AF(m, n, item_frequencies) = a recommender model which recommends the n
-    #       items in order of frequency according to item_frequencies
-    #       for each of the m entities
-    # Rep invariant:
-    #   - m > 0
-    #   - n > 0
-    #   - item_frequencies.shape == (n,)
-    #   - 0 <= item_frequencies[i] <= n-1 for all 0 <= i < n
-    # Safety from rep exposure:
-    #   - m and n are private and immutable
-    #   - item_frequency is private and never returned
-
-    def __init__(self, m, n, k):
+    def __init__(self, m, n, k, device=None):
         """Initializes a TopItemsRecommender object."""
         self._m = m  # entity dimension
         self._n = n  # item dimension
-
+        self.device = device if device is not None else torch.device('cpu')
         # array of item frequencies,
         # ranging from 0 (least frequent) to n-1 (most frequent)
-        self._item_frequencies = np.zeros((n,))
-
+        self._item_frequencies = torch.zeros((n,), dtype=torch.float32, device=self.device)
         self._checkrep()
+
+    def to(self, device):
+        self.device = device
+        self._item_frequencies = self._item_frequencies.to(device)
+        return self
 
     def _checkrep(self):
         """Asserts the rep invariant."""
@@ -81,38 +96,74 @@ class TopItemsRecommender(Recommender):
         self._checkrep()
         return scaled_ranks
 
-    def fit(self, data: tf.SparseTensor, **kwargs):
-        technique_matrix: np.ndarray = tf.sparse.to_dense(
-            tf.sparse.reorder(data)
-        ).numpy()
+    def fit(self, data, device=None, **kwargs):
+        # Accepts either numpy array, PyTorch tensor, or dict with indices/values/shape
+        if hasattr(data, 'indices') and hasattr(data, 'values') and hasattr(data, 'shape'):
+            technique_matrix = np.zeros((self._m, self._n))
+            # If data.indices is a method, call it; if it's an attribute, use it directly
+            # Ensure PyTorch sparse tensor is coalesced before accessing indices
+            tensor_data = data
+            if hasattr(tensor_data, 'is_sparse') and tensor_data.is_sparse:
+                tensor_data = tensor_data.coalesce()
+            indices = tensor_data.indices() if callable(tensor_data.indices) else tensor_data.indices
+            if torch.is_tensor(indices):
+                indices = indices.t().cpu().numpy()
+            horizontal_indices = tuple(indices[:, 0])
+            vertical_indices = tuple(indices[:, 1])
+            vals = tensor_data.values() if callable(tensor_data.values) else tensor_data.values
+            if torch.is_tensor(vals):
+                vals = vals.cpu().numpy()
+            technique_matrix[horizontal_indices, vertical_indices] = vals
+        elif isinstance(data, np.ndarray):
+            technique_matrix = data
+        elif torch.is_tensor(data):
+            technique_matrix = data.cpu().numpy()
+        else:
+            raise ValueError("Unsupported data format for fit().")
 
-        technique_frequency = technique_matrix.sum(axis=0)
-        assert technique_frequency.shape == (self._n,)
-
-        ranks = technique_frequency.argsort().argsort()
-
-        self._item_frequencies = ranks
+        technique_frequency = torch.tensor(technique_matrix.sum(axis=0), dtype=torch.float32, device=self.device)
+        assert technique_frequency.shape[0] == self._n
+        ranks = torch.argsort(torch.argsort(technique_frequency))
+        self._item_frequencies = ranks.to(self.device)
         self._checkrep()
 
-    def evaluate(self, test_data: tf.SparseTensor, **kwargs) -> float:
+    def evaluate(self, test_data, **kwargs) -> float:
         predictions_matrix = self.predict()
-
-        row_indices = tuple(index[0] for index in test_data.indices)
-        column_indices = tuple(index[1] for index in test_data.indices)
-        prediction_values = predictions_matrix[row_indices, column_indices]
+        if hasattr(test_data, 'indices') and hasattr(test_data, 'values'):
+            tensor_data = test_data
+            if hasattr(tensor_data, 'is_sparse') and tensor_data.is_sparse:
+                tensor_data = tensor_data.coalesce()
+            indices = tensor_data.indices() if callable(tensor_data.indices) else tensor_data.indices
+            if torch.is_tensor(indices):
+                indices = indices.t().cpu().numpy()
+            row_indices = tuple(indices[:, 0])
+            column_indices = tuple(indices[:, 1])
+            prediction_values = predictions_matrix[row_indices, column_indices]
+            vals = tensor_data.values() if callable(tensor_data.values) else tensor_data.values
+            if torch.is_tensor(vals):
+                vals = vals.cpu().numpy()
+            target_values = vals
+        elif isinstance(test_data, np.ndarray):
+            prediction_values = predictions_matrix[test_data.nonzero()]
+            target_values = test_data[test_data.nonzero()]
+        elif torch.is_tensor(test_data):
+            arr = test_data.cpu().numpy()
+            prediction_values = predictions_matrix[arr.nonzero()]
+            target_values = arr[arr.nonzero()]
+        else:
+            raise ValueError("Unsupported test_data format for evaluate().")
 
         self._checkrep()
-        return mean_squared_error(test_data.values, prediction_values)
+        return mean_squared_error(target_values, prediction_values)
 
-    def predict(self, **kwargs) -> np.ndarray:
+    def predict(self, device=None, **kwargs) -> np.ndarray:
         scaled_ranks = self._scale_item_frequency(self._item_frequencies)
-        matrix = np.repeat(np.expand_dims(scaled_ranks, axis=1), self._m, axis=1).T
-
+        matrix = scaled_ranks.repeat(self._m).reshape(self._n, self._m).T
         assert matrix.shape == (self._m, self._n)
-
         self._checkrep()
-        return matrix
+        return matrix.cpu().numpy() if matrix.device.type != 'cpu' else matrix.numpy()
 
-    def predict_new_entity(self, entity: tf.SparseTensor, **kwargs) -> np.array:
+    def predict_new_entity(self, entity, device=None, **kwargs) -> np.array:
         self._checkrep()
-        return self._scale_item_frequency(self._item_frequencies)
+        scaled = self._scale_item_frequency(self._item_frequencies)
+        return scaled.cpu().numpy() if scaled.device.type != 'cpu' else scaled.numpy()

@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+import torch
 
 
 class ReportTechniqueMatrix:
@@ -86,12 +86,14 @@ class ReportTechniqueMatrix:
         self._checkrep()
         return self._technique_ids
 
-    def to_sparse_tensor(self) -> tf.SparseTensor:
-        """Converts the matrix to a sparse tensor."""
+    def to_sparse_tensor(self) -> torch.Tensor:
+        """Converts the matrix to a PyTorch sparse tensor."""
         self._checkrep()
-        return tf.SparseTensor(
-            indices=self._indices, values=self._values, dense_shape=(self.m, self.n)
-        )
+        # PyTorch expects indices as a 2 x N tensor
+        indices = torch.tensor(self._indices, dtype=torch.long).t()
+        values = torch.tensor(self._values, dtype=torch.float32)
+        shape = (self.m, self.n)
+        return torch.sparse_coo_tensor(indices, values, shape)
 
     def to_numpy(self) -> np.ndarray:
         """Converts the matrix to a numpy array of shape."""
