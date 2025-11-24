@@ -1,6 +1,6 @@
 # PyTIE
 
-## Technique Inference Engine (TIE): Training Methods and Implementation Details
+## PyTorch Technique Inference Engine (TIE): Training Methods and Implementation Details
 
 The Technique Inference Engine (TIE) is a machine learning system that enables cyber defenders to forecast an adversary's next steps by predicting associated [MITRE ATT&CK](https://attack.mitre.org/) techniques from previously observed behaviors. TIE leverages one of the largest publicly available datasets linking CTI Reports to ATT&CK Techniques, with 43,899 technique observations across 6,236 CTI Reports, covering 96% of ATT&CK Enterprise v15.0.
 
