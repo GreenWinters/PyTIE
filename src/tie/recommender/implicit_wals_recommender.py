@@ -8,6 +8,7 @@ Significant changes made for research/development purposes.
 See LICENSE and README for details.
 '''
 import os
+import warnings
 import torch
 import numpy as np
 from implicit.als import AlternatingLeastSquares
@@ -38,6 +39,7 @@ class ImplicitWalsRecommender(Recommender):
         - model is never returned
 
     TODO: The implicit library's ALS implementation is CPU-only and does not support GPU acceleration.
+    Deprecated: GPU acceleration is not available via this wrapper, so it should only be used for compatibility purposes.
     To leverage GPU, consider migrating to a PyTorch or TensorFlow-based ALS implementation (e.g., torch-als, spotlight, or custom PyTorch ALS).
     This will significantly speed up large-scale experiments and remove the current bottleneck.
     """
@@ -61,6 +63,11 @@ class ImplicitWalsRecommender(Recommender):
         # for tracking how many new users we've seen so far
         self._num_new_users = 0
         self.device = device if device is not None else torch.device('cpu')
+        warnings.warn(
+            "ImplicitWalsRecommender is deprecated because it uses the CPU-only implicit ALS implementation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._checkrep()
 
     def to(self, device):

@@ -12,8 +12,11 @@ from .recommender import Recommender
 from .utils import (
     get_mitre_technique_ids_to_names,
     normalized_discounted_cumulative_gain,
+    normalized_discounted_cumulative_gain_tensor,
     precision_at_k,
+    precision_at_k_tensor,
     recall_at_k,
+    recall_at_k_tensor,
 )
 
 def parameter_cartesian_product(
@@ -175,7 +178,11 @@ class TechniqueInferenceEngine:
                 engine_copy._test_data = engine_copy._test_data.to_tensor(device)
             print(f"[fit_with_validation] Running on device {device} with hyperparameters: {hyperparameters}")
             engine_copy.fit(**hyperparameters)
-            score = recall_at_k(engine_copy.predict(), engine_copy._validation_data.to_pandas(), k=20)
+            predictions = engine_copy.predict_tensor(device)
+            validation_tensor = engine_copy._validation_data.to_dense_tensor(
+                device=predictions.device
+            )
+            score = recall_at_k_tensor(predictions, validation_tensor, k=20)
             print(f"[fit_with_validation] Score for {hyperparameters} on device {device}: {score}")
             return (hyperparameters, score)
 
@@ -230,7 +237,9 @@ class TechniqueInferenceEngine:
         Returns:
             The computed precision for the top k model predictions.
         """
-        return precision_at_k(self.predict(), self._test_data.to_pandas(), k)
+        predictions = self.predict_tensor()
+        test_tensor = self._test_data.to_dense_tensor(device=predictions.device)
+        return precision_at_k_tensor(predictions, test_tensor, k)
 
     def recall(self, k: int = 10) -> float:
         r"""Calculates the recall of the top k model predictions.
@@ -249,7 +258,9 @@ class TechniqueInferenceEngine:
         Returns:
             The computed recall for the top k model predictions.
         """
-        return recall_at_k(self.predict(), self._test_data.to_pandas(), k)
+        predictions = self.predict_tensor()
+        test_tensor = self._test_data.to_dense_tensor(device=predictions.device)
+        return recall_at_k_tensor(predictions, test_tensor, k)
 
     def normalized_discounted_cumulative_gain(self, k: int = 10) -> float:
         r"""Computes the Normalized Discounted Cumulative Gain (NDCG) on the test set.
@@ -272,9 +283,110 @@ class TechniqueInferenceEngine:
         Returns:
             NDCG computed on the top k predictions.
         """
-        return normalized_discounted_cumulative_gain(
-            self.predict(), self._test_data.to_pandas(), k=k
+        predictions = self.predict_tensor()
+        test_tensor = self._test_data.to_dense_tensor(device=predictions.device)
+        return normalized_discounted_cumulative_gain_tensor(predictions, test_tensor, k=k)
+
+    def predict_tensor(self, device: torch.device | None = None) -> torch.Tensor:
+        """Gets the predictions as a torch tensor, keeping them on device when possible."""
+
+        if hasattr(self._model, "predict_tensor"):
+            predictions = self._model.predict_tensor(method=self._prediction_method)
+        else:
+            predictions = torch.as_tensor(
+                self._model.predict(method=self._prediction_method), dtype=torch.float32
+            )
+        if device is not None:
+            predictions = predictions.to(device)
+        return predictions
+
+    def predict_tensor_for_new_report(
+        self,
+        techniques: frozenset[str],
+        device: torch.device | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Builds predictions for techniques not seen during training as a tensor."""
+
+        all_technique_ids = self._training_data.technique_ids
+        technique_ids_to_indices = {
+            all_technique_ids[i]: i for i in range(len(all_technique_ids))
+        }
+        technique_indices: list[int] = []
+        seen_indices: set[int] = set()
+        for technique in techniques:
+            if technique not in technique_ids_to_indices:
+                raise TechniqueNotFoundException(
+                    f"Model has not been trained on {technique}."
+                )
+            idx = technique_ids_to_indices[technique]
+            if idx not in seen_indices:
+                technique_indices.append(idx)
+                seen_indices.add(idx)
+        if not technique_indices:
+            raise TechniqueNotFoundException(
+                "At least one technique must be provided for inference."
+            )
+        technique_indices.sort()
+
+        n = self._training_data.n
+        indices_2d = np.array([[0, idx] for idx in technique_indices], dtype=np.int64)
+        values = np.ones((len(technique_indices),), dtype=np.float32)
+        indices_tensor = torch.tensor(indices_2d, dtype=torch.long)
+        values_tensor = torch.tensor(values, dtype=torch.float32)
+        technique_tensor = torch.sparse_coo_tensor(
+            indices_tensor.t(), values_tensor, size=(1, n)
         )
+
+        target_device = device
+        if target_device is None:
+            model_device = getattr(self._model, "device", None)
+            target_device = (
+                model_device if isinstance(model_device, torch.device) else torch.device("cpu")
+            )
+
+        predictions_vec = self._model.predict_new_entity(
+            technique_tensor, method=self._prediction_method, **kwargs
+        )
+        if predictions_vec is None:
+            predictions_tensor = torch.empty(0, dtype=torch.float32, device=target_device)
+        else:
+            predictions_tensor = torch.as_tensor(
+                np.asarray(predictions_vec), dtype=torch.float32, device=target_device
+            ).reshape(-1)
+
+        full_predictions = torch.zeros(n, dtype=torch.float32, device=target_device)
+        if predictions_tensor.numel() == 0:
+            return full_predictions
+        if predictions_tensor.numel() == n:
+            full_predictions.copy_(predictions_tensor[:n])
+            return full_predictions
+        if predictions_tensor.numel() == len(technique_indices):
+            for i, idx in enumerate(technique_indices):
+                if 0 <= idx < n:
+                    try:
+                        full_predictions[idx] = predictions_tensor[i]
+                    except Exception as exc:
+                        print(
+                            f"[predict_tensor_for_new_report] Could not assign predictions_tensor[{i}] to full_predictions[{idx}]: {exc}"
+                        )
+            return full_predictions
+        min_len = min(predictions_tensor.numel(), len(technique_indices))
+        for i in range(min_len):
+            idx = technique_indices[i]
+            if 0 <= idx < n:
+                try:
+                    full_predictions[idx] = predictions_tensor[i]
+                except Exception as exc:
+                    print(
+                        f"[predict_tensor_for_new_report] Could not assign predictions_tensor[{i}] to full_predictions[{idx}]: {exc}"
+                    )
+        if predictions_tensor.numel() != len(technique_indices):
+            print(
+                f"[predict_tensor_for_new_report] Ambiguous mapping between predictions_tensor (len={predictions_tensor.numel()}) "
+                f"and technique_indices (len={len(technique_indices)}). Only mapped up to min length."
+            )
+        return full_predictions
 
     def predict(self) -> pd.DataFrame:
         """Obtains model predictions.
@@ -289,10 +401,8 @@ class TechniqueInferenceEngine:
             test_data containing the predictions values for each report and technique
             combination.
         """
-        predictions = self._model.predict(method=self._prediction_method)
-        # Ensure predictions are on CPU and numpy before DataFrame construction
-        if torch.is_tensor(predictions):
-            predictions = predictions.detach().cpu().numpy()
+        predictions_tensor = self.predict_tensor()
+        predictions = predictions_tensor.detach().cpu().numpy()
 
         predictions_dataframe = pd.DataFrame(
             predictions,
@@ -369,46 +479,11 @@ class TechniqueInferenceEngine:
 
         technique_indices = list(technique_indices)
         technique_indices.sort()
-        # Build correct indices for a single entity (row 0, col = technique index)
         n = self._training_data.n
-        indices_2d = np.array([[0, idx] for idx in technique_indices], dtype=np.int64)
-        values = np.ones((len(technique_indices),), dtype=np.float32)
-        indices_tensor = torch.tensor(indices_2d, dtype=torch.long)
-        values_tensor = torch.tensor(values, dtype=torch.float)
-        technique_tensor = torch.sparse_coo_tensor(indices_tensor.t(), values_tensor, size=(1, n))
-
-        # Get predictions for all techniques
-        predictions_vec = self._model.predict_new_entity(
-            technique_tensor, method=self._prediction_method, **kwargs
+        predictions_tensor = self.predict_tensor_for_new_report(
+            techniques, **kwargs
         )
-        # Robustly expand predictions to full length
-        full_predictions = np.zeros(n)
-        if predictions_vec is None or len(predictions_vec) == 0:
-            # If model returns nothing, leave as zeros
-            pass
-        elif len(predictions_vec) == len(technique_indices):
-            # Direct mapping: predictions_vec[i] corresponds to technique_indices[i]
-            for i, idx in enumerate(technique_indices):
-                if 0 <= idx < n:
-                    try:
-                        full_predictions[idx] = predictions_vec[i]
-                    except Exception as e:
-                        print(f"[predict_for_new_report] Warning: Could not assign predictions_vec[{i}] to full_predictions[{idx}]: {e}")
-        elif len(predictions_vec) == n:
-            # predictions_vec is already full length
-            full_predictions = predictions_vec
-        else:
-            # Defensive: try to map by index, but avoid out-of-bounds
-            min_len = min(len(predictions_vec), len(technique_indices))
-            for i in range(min_len):
-                idx = technique_indices[i]
-                if 0 <= idx < n:
-                    try:
-                        full_predictions[idx] = predictions_vec[i]
-                    except Exception as e:
-                        print(f"[predict_for_new_report] Warning: Could not assign predictions_vec[{i}] to full_predictions[{idx}]: {e}")
-            if len(predictions_vec) != len(technique_indices):
-                print(f"[predict_for_new_report] Warning: Ambiguous mapping between predictions_vec (len={len(predictions_vec)}) and technique_indices (len={len(technique_indices)}). Only mapped up to min length.")
+        full_predictions = predictions_tensor.detach().cpu().numpy()
         training_indices_dense = np.zeros(n)
         for idx in technique_indices:
             if 0 <= idx < n:

@@ -389,10 +389,17 @@ class FactorizationRecommender(Recommender):
             An mxn array of values.
         """
         self._checkrep()
+        predictions = self.predict_tensor(method)
+        return predictions.detach().cpu().numpy()
 
-        return calculate_predicted_matrix(
-            np.nan_to_num(self._U.cpu().numpy()), np.nan_to_num(self._V.cpu().numpy()), method
-        )
+    def predict_tensor(
+        self,
+        method: PredictionMethod = PredictionMethod.DOT,
+    ) -> torch.Tensor:
+        """Gets the model predictions as a torch tensor."""
+        self._checkrep()
+        tensor_predictions = calculate_predicted_matrix(self._U, self._V, method)
+        return tensor_predictions.to(self.device)
 
     def predict_new_entity(
         self,

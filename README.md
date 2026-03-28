@@ -44,12 +44,16 @@ The core functionality of `tie_model.py` is to orchestrate the training, evaluat
 		- **Weaknesses:** Assumes linear relationships, less effective for highly non-linear data, sensitive to sparsity.
 		- **Prediction Target:** Predicts technique relevance for each report/entity.
 		- **Output Interpretation:** Higher scores indicate stronger predicted association; top-k techniques are recommended.
-	- Implicit BPR/WALS (using the implicit library)
-		- **Description:** GPU-accelerated implementations of BPR and WALS optimized for large-scale, implicit feedback data. Uses efficient sparse matrix operations.
-		- **Strengths:** Highly scalable, fast training on GPU, robust to missing data.
-		- **Weaknesses:** Requires careful tuning, less interpretable than standard matrix factorization, may be sensitive to data distribution.
-		- **Prediction Target:** Ranks or scores ATT&CK techniques for each report/entity.
-		- **Output Interpretation:** Techniques with highest scores/ranks are recommended for further analysis.
+	- Implicit BPR (via implicit.gpu)
+		- **Description:** GPU-accelerated Bayesian Personalized Ranking implemented through the `implicit.gpu.bpr` backend. Trains directly on CUDA tensors and runs efficiently with the conda-forge GPU build (`conda install -c conda-forge implicit implicit-proc=*=gpu`).
+		- **Strengths:** Highly scalable ranking, runs on GPU, robust to missing data.
+		- **Weaknesses:** Requires careful tuning, less interpretable than standard matrix factorization, sensitive to data distribution.
+		- **Prediction Target:** Ranks ATT&CK techniques for each report/entity.
+		- **Output Interpretation:** Techniques with highest predicted rank are most likely to be used by the adversary.
+	- Implicit WALS (deprecated CPU wrapper)
+		- **Description:** Compatibility shim for the CPU-only `implicit.als` implementation. Maintained for backwards compatibility but emits a deprecation warning and should be avoided when GPU acceleration is required.
+		- **Strengths:** Matches legacy behavior.
+		- **Weaknesses:** CPU-only, significantly slower, no GPU acceleration, less future proof.
 - **Device Management:**
 	- Models and data are moved to GPU if available, otherwise CPU.
 - **Hyperparameter Sweeps:**
@@ -71,6 +75,15 @@ The core functionality of `tie_model.py` is to orchestrate the training, evaluat
 - **NDCG@k:** Evaluates ranking quality, rewarding correct ordering of relevant techniques.
 - **MSE:** Used for regression-based models to assess fit quality.
 - **Best Model Selection:** Models compared and best selected by NDCG@20.
+### GPU Implicit Setup
+
+The GPU-friendly `implicit` artifacts require the conda-forge build that ships `implicit.gpu.bpr` and related modules. Install them with:
+
+```sh
+conda install -c conda-forge implicit implicit-proc=*=gpu
+```
+
+This ensures `ImplicitBPRRecommender` uses the `implicit.gpu.bpr.BayesianPersonalizedRanking` backend and removes the `libcublas` conflict that arose with the CPU-only package.
 
 ### Distinction from Original Repository
 

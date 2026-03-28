@@ -9,7 +9,8 @@ See LICENSE and README for details.
 '''
 import numpy as np
 import torch
-from implicit.bpr import BayesianPersonalizedRanking
+from implicit.cpu.bpr import BayesianPersonalizedRanking as CpuBayesianPersonalizedRanking
+from implicit.gpu.bpr import BayesianPersonalizedRanking as GpuBayesianPersonalizedRanking
 from scipy import sparse
 from sklearn.metrics import mean_squared_error
 
@@ -35,8 +36,11 @@ class ImplicitBPRRecommender:
        - num_new_users >= 0
     
     Safety from rep exposure:
-       - k is private and immutable
-       - model is never returned
+        - k is private and immutable
+        - model is never returned
+    Backend:
+        This adapter uses implicit.gpu.bpr.BayesianPersonalizedRanking so training
+        runs on the GPU when the conda-forge GPU build is installed.
     """
     def __init__(self, m: int, n: int, k: int, device=None):
         """Initializes an ImplicitBPRRecommender object.
@@ -56,6 +60,9 @@ class ImplicitBPRRecommender:
         self._n = n
         self._k = k
         self._model = None
+        self._model_cls = GpuBayesianPersonalizedRanking
+        self._cpu_model_cls = CpuBayesianPersonalizedRanking
+        self._using_gpu = True
 
         self._num_new_users = 0
         self.device = device if device is not None else torch.device('cpu')
@@ -110,14 +117,6 @@ class ImplicitBPRRecommender:
         else:
             self.device = torch.device('cpu')
 
-        self._model = BayesianPersonalizedRanking(
-            factors=self._k,
-            learning_rate=learning_rate,
-            regularization=regularization_coefficient,
-            iterations=epochs,
-            verify_negative_samples=True,
-        )
-
         # Accepts either numpy array, PyTorch tensor, or dict with indices/values/shape
         if hasattr(data, 'indices') and hasattr(data, 'values') and hasattr(data, 'shape'):
             # PyTorch sparse tensor handling
@@ -142,8 +141,48 @@ class ImplicitBPRRecommender:
         else:
             raise ValueError("Unsupported data format for fit().")
 
-        self._model.fit(sparse_data)
+        try:
+            self._model = self._create_model(
+                use_gpu=self._using_gpu,
+                learning_rate=learning_rate,
+                regularization=regularization_coefficient,
+                iterations=epochs,
+            )
+            self._model.fit(sparse_data)
+        except RuntimeError as exc:
+            if self._using_gpu:
+                print(
+                    "[ImplicitBPR] GPU training failed ({exc}). Falling back to CPU implementation.".format(
+                        exc=exc
+                    )
+                )
+                self._using_gpu = False
+                self._model = self._create_model(
+                    use_gpu=False,
+                    learning_rate=learning_rate,
+                    regularization=regularization_coefficient,
+                    iterations=epochs,
+                )
+                self._model.fit(sparse_data)
+            else:
+                raise
         self._checkrep()
+
+    def _create_model(
+        self,
+        use_gpu: bool,
+        learning_rate: float,
+        regularization: float,
+        iterations: int,
+    ):
+        cls = self._model_cls if use_gpu else self._cpu_model_cls
+        return cls(
+            factors=self._k,
+            learning_rate=learning_rate,
+            regularization=regularization,
+            iterations=iterations,
+            verify_negative_samples=True,
+        )
 
     def evaluate(
         self,
