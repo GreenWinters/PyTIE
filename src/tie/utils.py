@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 import pandas as pd
+import torch
 from mitreattack.stix20 import MitreAttackData
 
 from .constants import PredictionMethod
@@ -30,189 +31,177 @@ def get_mitre_technique_ids_to_names(stix_filepath: str) -> dict[str, str]:
     return all_technique_ids
 
 
-def _get_num_test_items_in_top_k_per_user(
-    predictions: pd.DataFrame, test_data: pd.DataFrame, k: int
-) -> pd.Series:
-    """Calculates the number of test items in the top k predictions for each user.
+def _ensure_tensor(matrix) -> torch.Tensor:
+    """Converts pandas/numpy inputs to a float tensor on the CPU."""
 
-    Args:
-        predictions: an mxn matrix of predictions where m is the number of entities
-            and n is the number of items.  Requires m > 0 and n > 0.
-        test_data: an mxn matrix of test data where each entry is 1 if observed in the
-            test set, 0 otherwise.
-        k: the number of predictions to include in the top k.  Requires 0 < k <= n.
-
-    Returns:
-        Array r such that r[i] is the number of items in test_data[i, :] which are in
-        the top k ranked predictions of predictions[i, :].
-    """
-    m, n = test_data.shape
-    # get a matrix with a 1 in the top 10 spots
-    # find overlap with test set
-    # if 1 in both, then predicted in top k
-    # min to get lowest rank in group, aka less than k
-    top_k_predictions = predictions.rank(axis=1, method="max", ascending=False) <= k
-    assert m, 1 == top_k_predictions.shape
-    test_items_in_top_k = (test_data > 0) & top_k_predictions
-    num_test_items_in_top_k = test_items_in_top_k.sum(axis=1)
-    assert m, 1 == num_test_items_in_top_k.shape
-
-    return num_test_items_in_top_k
+    if torch.is_tensor(matrix):
+        tensor = matrix.to(dtype=torch.float32)
+    elif isinstance(matrix, pd.DataFrame):
+        tensor = torch.as_tensor(matrix.to_numpy(copy=False), dtype=torch.float32)
+    else:
+        tensor = torch.as_tensor(np.asarray(matrix), dtype=torch.float32)
+    return tensor
 
 
 def precision_at_k(predictions: pd.DataFrame, test_data: pd.DataFrame, k: int) -> float:
-    r"""Calculates the precision of the top k predictions based on test data.
+    """Calculates precision via the tensor variant (keeps original signature)."""
 
-    Precision is defined as the average fraction of items in the top k predictions
-    which appear in the test set.  If k < the number of items in the test set for a
-    particular user, then the maximum precision is 1.0.
-
-    Mathematically, it is defined as
-    precision@k = (1\m) \sum_u (\sum_{i=1}^k [[pred_i in test set]] / k)
-
-    Args:
-        predictions: an mxn matrix of predictions where m is the number of entities
-            and n is the number of items.  Requires m > 0 and n > 0.
-        test_data: an mxn matrix of test data where each entry is 1 if observed in the
-            test set, 0 otherwise.
-        k: the number of predictions to include in the top k.  Requires 0 < k <= n.
-
-    Returns:
-        The computed precision for the top k predictions, or np.nan if the test set is
-        empty.
-    """
-    m, n = test_data.shape
-    assert m > 0
-    assert n > 0
-    assert m, n == predictions.shape
-    assert 0 < k <= n
-
-    num_test_items_in_top_k = _get_num_test_items_in_top_k_per_user(
-        predictions, test_data, k
-    )
-
-    # sum number of predictions in top k, divide by k
-    return num_test_items_in_top_k.mean(skipna=True) / k
+    predictions_tensor = _ensure_tensor(predictions)
+    test_tensor = _ensure_tensor(test_data)
+    return precision_at_k_tensor(predictions_tensor, test_tensor, k)
 
 
 def recall_at_k(predictions: pd.DataFrame, test_data: pd.DataFrame, k: int) -> float:
-    r"""Calculates the recall of the top k predictions based on test data.
+    """Calculates recall via the tensor variant (keeps original signature)."""
 
-    Recall is defined as the average fraction of items in the test set which appear
-    in the top k predictions.  If k >= the number of items in the test set for a
-    particular user, then the maximum recall is 1.0.
-
-    Mathematically, it is defined as
-    recall@k =
-        (1\m) \sum_u (\sum_{i=1}^k [[pred_i in test set]] / |test set for entity i|
-
-    Args:
-        predictions: an mxn matrix of predictions where m is the number of entities
-            and n is the number of items.  Requires m > 0 and n > 0.
-        test_data: an mxn matrix of test data where each entry is 1 if observed in the
-            test set, 0 otherwise.
-        k: the number of predictions to include in the top k.  Requires 0 < k <= n.
-
-    Returns:
-        The computed recall for the top k predictions, or np.,nan if the test set is
-        empty.
-    """
-    m, n = test_data.shape
-    assert m > 0
-    assert n > 0
-    assert m, n == predictions.shape
-    assert 0 < k <= n
-
-    num_test_items_in_top_k = _get_num_test_items_in_top_k_per_user(
-        predictions, test_data, k
-    )
-    num_test_items_per_user = test_data.sum(axis=1)
-
-    fraction_recalled_predictions = num_test_items_in_top_k / num_test_items_per_user
-    # sum number of predictions in top k, divide by k
-    return fraction_recalled_predictions.mean(skipna=True)
+    predictions_tensor = _ensure_tensor(predictions)
+    test_tensor = _ensure_tensor(test_data)
+    return recall_at_k_tensor(predictions_tensor, test_tensor, k)
 
 
 def normalized_discounted_cumulative_gain(
     predictions: pd.DataFrame, test_data: pd.DataFrame, k: int = 10
 ) -> float:
-    r"""Computes the Normalized Discounted Cumulative Gain (NDCG) on test_data.
+    """Calculates NDCG via the tensor variant (keeps original signature)."""
 
-    NDCG measures the goodness of a ranking based on the relative ordering of
-    test set entries in the top-k predictions.  Test set predictions
-    that appear near the top of the top-k predictions (in descending order)
-    contribute more to NDCG than predictions which are ranked lower.
-    NDCG ranges from 0 to 1, where 1 is a perfect ranking.
+    predictions_tensor = _ensure_tensor(predictions)
+    test_tensor = _ensure_tensor(test_data)
+    return normalized_discounted_cumulative_gain_tensor(predictions_tensor, test_tensor, k)
 
-    Mathematically, NDCG is defined as
-    NDCG@K = DCG@K / IDCG@K
-    DCG@K = (1/m) \sum_u \sum_{i=1}^k (2^[[pred_i in test set]] - 1)/(log_2 (i+1))
-    IDCG@K is a normalization constant corresponding to the maximum possible value
-        of DCG@K
 
-    Args:
-        predictions: an mxn matrix of predictions where m is the number of entities
-            and n is the number of items.  Requires m > 0 and n > 0.
-        test_data: an mxn matrix of test data where each entry is 1 if observed in the
-            test set, 0 otherwise.
-        k: the number of predictions to include in the top k.  Requires 0 < k <= n.
+def precision_at_k_tensor(predictions: torch.Tensor, test_data: torch.Tensor, k: int) -> float:
+    """Calculates precision directly on tensors."""
 
-    Returns:
-        NDCG computed on the top k predictions, or np.nan if the test set is empty.
-    """
-    # assert preconditions
-    m, n = test_data.shape
-    assert m > 0
-    assert n > 0
-    assert m, n == predictions.shape
-    assert 0 < k <= n
+    if predictions.ndim != 2 or test_data.ndim != 2:
+        raise ValueError("Predictions and test data must be 2D tensors.")
+    if predictions.shape != test_data.shape:
+        raise ValueError("Predictions and test data must have the same shape.")
+    m, n = predictions.shape
+    if not (0 < k <= n):
+        raise ValueError("k must be between 1 and the number of items.")
 
-    # calculate idcg
-    test_set_size = test_data.sum(axis=1).astype("int")
-    assert m, 1 == test_set_size.shape
+    topk_indices = torch.topk(predictions, k, dim=1).indices
+    mask = torch.zeros_like(predictions, dtype=torch.bool)
+    mask.scatter_(1, topk_indices, True)
+    hits = ((test_data > 0) & mask).sum(dim=1, dtype=torch.float32)
+    return (hits.mean().item() / k)
 
-    def max_idcg(test_size, k) -> float:
-        return sum(1 / math.log2(i + 1) for i in range(1, min(test_size, k) + 1))
 
-    user_idcg = test_set_size.apply(lambda x: max_idcg(x, k))
+def recall_at_k_tensor(predictions: torch.Tensor, test_data: torch.Tensor, k: int) -> float:
+    """Calculates recall directly on tensors."""
 
-    idcg = np.mean(np.where(lambda x: x > 0, user_idcg, np.nan))
+    if predictions.ndim != 2 or test_data.ndim != 2:
+        raise ValueError("Predictions and test data must be 2D tensors.")
+    if predictions.shape != test_data.shape:
+        raise ValueError("Predictions and test data must have the same shape.")
+    m, n = predictions.shape
+    if not (0 < k <= n):
+        raise ValueError("k must be between 1 and the number of items.")
 
-    prediction_ranking = predictions.rank(axis=1, method="first", ascending=False)
-    assert m, 1 == prediction_ranking.shape
+    topk_values = torch.topk(predictions, k, dim=1).values
+    kth_values = topk_values[:, -1].unsqueeze(1)
+    greater_mask = predictions > kth_values
+    mask = greater_mask.clone()
+    tie_mask = predictions == kth_values
+    num_greater = greater_mask.sum(dim=1)
+    tie_slots = (k - num_greater).clamp(min=0)
+    tie_size = tie_mask.sum(dim=1)
+    tie_fits = tie_size <= tie_slots
+    tie_mask = tie_mask & tie_fits.unsqueeze(1)
+    mask |= tie_mask
+    hits = ((test_data > 0) & mask).sum(dim=1, dtype=torch.float32)
+    num_test_items = (test_data > 0).sum(dim=1, dtype=torch.float32)
+    valid = num_test_items > 0
+    if not valid.any():
+        return float("nan")
+    recall_per_user = torch.zeros_like(num_test_items)
+    recall_per_user[valid] = hits[valid] / num_test_items[valid]
+    return recall_per_user[valid].mean().item()
 
-    # calculating dcg
-    # numerator: 1 if test set is in prediction, 0 otherwise
-    numerator = np.logical_and(
-        (prediction_ranking <= k).to_numpy(), test_data.to_numpy()
+
+def normalized_discounted_cumulative_gain_tensor(
+    predictions: torch.Tensor, test_data: torch.Tensor, k: int = 10
+) -> float:
+    """Calculates NDCG directly on tensors."""
+
+    if predictions.ndim != 2 or test_data.ndim != 2:
+        raise ValueError("Predictions and test data must be 2D tensors.")
+    if predictions.shape != test_data.shape:
+        raise ValueError("Predictions and test data must have the same shape.")
+    m, n = predictions.shape
+    if not (0 < k <= n):
+        raise ValueError("k must be between 1 and the number of items.")
+
+    device = predictions.device
+    predictions = predictions.to(dtype=torch.float64)
+    test_data = test_data.to(dtype=torch.float64)
+    _, sorted_indices = torch.sort(predictions, dim=1, descending=True)
+    ranks = torch.arange(1, n + 1, device=device, dtype=torch.float64).unsqueeze(0).expand(m, -1)
+    rank_positions = torch.zeros_like(predictions, dtype=torch.float64)
+    rank_positions.scatter_(1, sorted_indices, ranks)
+    numerator_mask = (rank_positions <= k) & (test_data > 0)
+    denominator = torch.log2(rank_positions + 1)
+    dcg_values = torch.zeros_like(predictions, dtype=torch.float64)
+    dcg_values[numerator_mask] = 1.0 / denominator[numerator_mask]
+    entity_dcg = dcg_values.sum(dim=1)
+
+    test_set_size = (test_data > 0).sum(dim=1, dtype=torch.int32)
+    user_idcg = torch.tensor(
+        [_max_idcg(int(size.item()), k) for size in test_set_size],
+        dtype=torch.float64,
+        device=device,
     )
-    # denominator: log_2 of ranking + 1
-    denominator = np.log2(prediction_ranking.to_numpy() + 1)
+    valid_idcg = user_idcg > 0
+    if not valid_idcg.any():
+        return float("nan")
+    valid_dcg = entity_dcg > 0
+    if not valid_dcg.any():
+        return float("nan")
+    dcg_mean = entity_dcg[valid_dcg].mean()
+    idcg_mean = user_idcg[valid_idcg].mean()
+    if idcg_mean == 0:
+        return float("nan")
+    return (dcg_mean / idcg_mean).item()
 
-    dcg = np.divide(numerator, denominator)
-    # in test set or rank should never be nan
-    assert not np.any(np.isnan(dcg))
 
-    entity_dcg = np.sum(dcg, axis=1)
-    # only count for test
-    dcg = np.mean(np.where(lambda x: x > 0, entity_dcg, np.nan))
+def _max_idcg(test_set_size: int, k: int) -> float:
+    """Computes the maximum DCG for the given test set size."""
 
-    return dcg / idcg
+    limit = max(0, min(test_set_size, k))
+    return sum(1.0 / math.log2(i + 1) for i in range(1, limit + 1))
+
+
+def _normalize_tensor(tensor: torch.Tensor, axis: int) -> torch.Tensor:
+    norm = torch.linalg.norm(tensor, ord=2, dim=axis, keepdim=True)
+    norm = torch.where(norm == 0.0, torch.ones_like(norm), norm)
+    return tensor / norm
 
 
 def calculate_predicted_matrix(
-    U: np.ndarray, V: np.ndarray, method: PredictionMethod = PredictionMethod.DOT
-) -> np.ndarray:
-    """Calculates the prediction matrix UV^T according to the dot or cosine product.
+    U, V, method: PredictionMethod = PredictionMethod.DOT
+) -> torch.Tensor | np.ndarray:
+    """Calculates the prediction matrix UV^T according to the dot or cosine product."""
+    if torch.is_tensor(U) or torch.is_tensor(V):
+        U_tensor = U if torch.is_tensor(U) else torch.tensor(U, dtype=torch.float32)
+        V_tensor = V if torch.is_tensor(V) else torch.tensor(V, dtype=torch.float32)
+        if U_tensor.dtype != torch.float32:
+            U_tensor = U_tensor.float()
+        if V_tensor.dtype != torch.float32:
+            V_tensor = V_tensor.float()
 
-    Args:
-        U: mxk array of entity embeddings
-        V: nxk array of item embeddings
-        method: Matrix product method to use.
+        if method == PredictionMethod.DOT:
+            result = torch.matmul(U_tensor, V_tensor.t())
+        elif method == PredictionMethod.COSINE:
+            U_scaled = _normalize_tensor(U_tensor, axis=1)
+            V_scaled = _normalize_tensor(V_tensor, axis=1)
+            result = torch.matmul(U_scaled, V_scaled.t())
+        else:
+            raise ValueError(f"Unsupported prediction method: {method}")
 
-    Returns:
-        The matrix product UV^T, according to method.
-    """
+        return result
+
+    U = np.asarray(U, dtype=np.float32)
+    V = np.asarray(V, dtype=np.float32)
     if method == PredictionMethod.DOT:
         U_scaled = U
         V_scaled = V
@@ -220,18 +209,12 @@ def calculate_predicted_matrix(
         U_norm = np.expand_dims(np.linalg.norm(U, ord=2, axis=1), axis=1)
         V_norm = np.expand_dims(np.linalg.norm(V, ord=2, axis=1), axis=1)
 
-        # if norm is 0, ie if the embedding is 0
-        # then do not scale by norm at all
         U_norm[U_norm == 0.0] = 1.0
         V_norm[V_norm == 0.0] = 1.0
 
-        assert U_norm.shape == (U.shape[0], 1)
-        assert V_norm.shape == (V.shape[0], 1)
-
-        assert not np.isnan(U_norm).any()
-        assert not np.isnan(V_norm).any()
-
         U_scaled = np.divide(U, U_norm)
         V_scaled = np.divide(V, V_norm)
+    else:
+        raise ValueError(f"Unsupported prediction method: {method}")
 
     return U_scaled @ V_scaled.T

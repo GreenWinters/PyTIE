@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import torch
+from typing import Optional
 
 
 class ReportTechniqueMatrix:
@@ -86,14 +87,27 @@ class ReportTechniqueMatrix:
         self._checkrep()
         return self._technique_ids
 
-    def to_sparse_tensor(self) -> torch.Tensor:
-        """Converts the matrix to a PyTorch sparse tensor."""
+    def to_sparse_tensor(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        """Converts the matrix to a PyTorch sparse tensor on the requested device."""
         self._checkrep()
-        # PyTorch expects indices as a 2 x N tensor
         indices = torch.tensor(self._indices, dtype=torch.long).t()
         values = torch.tensor(self._values, dtype=torch.float32)
         shape = (self.m, self.n)
-        return torch.sparse_coo_tensor(indices, values, shape)
+        tensor = torch.sparse_coo_tensor(indices, values, shape)
+        if device is not None:
+            return tensor.to(device)
+        return tensor
+
+    def to_dense_tensor(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        """Returns a dense representation of the matrix on the requested device."""
+        self._checkrep()
+        tensor = torch.zeros(self.shape, dtype=torch.float32)
+        horizontal_indices = tuple(index[0] for index in self._indices)
+        vertical_indices = tuple(index[1] for index in self._indices)
+        tensor[horizontal_indices, vertical_indices] = torch.tensor(self._values, dtype=torch.float32)
+        if device is not None:
+            return tensor.to(device)
+        return tensor
 
     def to_numpy(self) -> np.ndarray:
         """Converts the matrix to a numpy array of shape."""
