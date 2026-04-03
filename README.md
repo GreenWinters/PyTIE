@@ -90,15 +90,30 @@ The core functionality of `tie_model.py` is to orchestrate the training, evaluat
 - **NDCG@k:** Evaluates ranking quality, rewarding correct ordering of relevant techniques.
 - **MSE:** Used for regression-based models to assess fit quality.
 - **Best Model Selection:** Models compared and best selected by NDCG@20.
-### GPU Implicit Setup
 
-The GPU-friendly `implicit` artifacts require the conda-forge build that ships `implicit.gpu.bpr` and related modules. Install them with:
+### Environment Setup (GPU, Conda, and Poetry)
 
-```sh
-conda install -c conda-forge implicit implicit-proc=*=gpu
-```
+To enable GPU acceleration and ensure all dependencies (including the GPU-enabled `implicit` package) are installed correctly, follow these steps:
 
-This ensures `ImplicitBPRRecommender` uses the `implicit.gpu.bpr.BayesianPersonalizedRanking` backend and removes the `libcublas` conflict that arose with the CPU-only package.
+1. **Create the Conda Environment (CUDA 11.2 compatible):**
+	```sh
+	conda env create -f technique_inference_engine/environment.yml
+	conda activate tie_gpu
+	```
+
+2. **Install Poetry Dependencies:**
+	```sh
+	poetry install
+	```
+
+3. **Install GPU-enabled Implicit (if not already present):**
+	The GPU-friendly `implicit` package is required for fast training with the `ImplicitBPRRecommender`. Install it with:
+	```sh
+	conda install -c conda-forge implicit implicit-proc=*=gpu
+	```
+	This ensures the `implicit.gpu.bpr.BayesianPersonalizedRanking` backend is available and avoids `libcublas` conflicts from the CPU-only package.
+
+This setup ensures all models can leverage GPU acceleration where available, and all dependencies are managed for reproducibility.
 
 ### Distinction from Original Repository
 

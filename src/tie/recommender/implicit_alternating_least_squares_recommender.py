@@ -5,22 +5,40 @@ Adapted for the implicit GPU implementation of ALS; keeps the same Recommender
 interface used throughout the Technique Inference Engine. The GPU backend
 handles sparse data efficiently while still exposing the usual user/item factor
 matrices and prediction helpers.
+
+@author: @GreenWinters
 """
 import os
+from contextlib import nullcontext
 from typing import Optional
 
 import numpy as np
 from scipy import sparse
 import torch
 from implicit.cpu.als import AlternatingLeastSquares as CpuAlternatingLeastSquares
-from implicit.gpu.als import AlternatingLeastSquares as GpuAlternatingLeastSquares
+try:
+    from implicit.gpu.als import AlternatingLeastSquares as GpuAlternatingLeastSquares
+    _GPU_IMPORT_ERROR = None
+except Exception as exc:  # implicit raises RuntimeError when CUDA extension is missing
+    GpuAlternatingLeastSquares = None
+    _GPU_IMPORT_ERROR = exc
 
 from ..constants import PredictionMethod
 from ..utils import calculate_predicted_matrix
 from .recommender import Recommender
 from sklearn.metrics import mean_squared_error
+try:
+    from threadpoolctl import threadpool_limits
+except Exception:
+    threadpool_limits = None
 
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+
+
+def _limit_blas_threads():
+    if threadpool_limits is None:
+        return nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
 
 
 def _to_csr_matrix(data):
@@ -68,28 +86,40 @@ class ImplicitAlternatingLeastSquaresRecommender(Recommender):
         self._random_state = random_state
         self._model_cls = GpuAlternatingLeastSquares
         self._cpu_model_cls = CpuAlternatingLeastSquares
-        self._using_gpu = True
-        try:
-            self._model = self._create_model(use_gpu=True)
-        except RuntimeError as exc:
+        self._using_gpu = self._model_cls is not None
+        if not self._using_gpu:
             print(
-                "[ImplicitALS] GPU initialization failed ({exc}). Falling back to CPU implementation.".format(
-                    exc=exc
+                "[ImplicitALS] GPU backend unavailable ({exc}). Using CPU implementation.".format(
+                    exc=_GPU_IMPORT_ERROR
                 )
             )
-            self._using_gpu = False
             self._model = self._create_model(use_gpu=False)
+        else:
+            try:
+                self._model = self._create_model(use_gpu=True)
+            except (RuntimeError, ValueError) as exc:
+                if _is_missing_cuda_extension(exc):
+                    print(
+                        "[ImplicitALS] GPU initialization failed ({exc}). Falling back to CPU implementation.".format(
+                            exc=exc
+                        )
+                    )
+                    self._using_gpu = False
+                    self._model = self._create_model(use_gpu=False)
+                else:
+                    raise
 
     def _create_model(self, use_gpu: bool):
         cls = self._model_cls if use_gpu else self._cpu_model_cls
-        return cls(
-            factors=self._k,
-            regularization=self._regularization,
-            alpha=self._alpha,
-            iterations=self._iterations,
-            calculate_training_loss=self._calculate_training_loss,
-            random_state=self._random_state,
-        )
+        with _limit_blas_threads():
+            return cls(
+                factors=self._k,
+                regularization=self._regularization,
+                alpha=self._alpha,
+                iterations=self._iterations,
+                calculate_training_loss=self._calculate_training_loss,
+                random_state=self._random_state,
+            )
 
     @property
     def U(self) -> np.ndarray:
@@ -113,9 +143,10 @@ class ImplicitAlternatingLeastSquaresRecommender(Recommender):
     ):
         csr = _to_csr_matrix(data)
         try:
-            self._model.fit(csr)
-        except RuntimeError as exc:
-            if self._using_gpu:
+            with _limit_blas_threads():
+                self._model.fit(csr)
+        except (RuntimeError, ValueError) as exc:
+            if self._using_gpu and _is_missing_cuda_extension(exc):
                 print(
                     "[ImplicitALS] GPU training failed ({exc}). Falling back to CPU implementation.".format(
                         exc=exc
@@ -123,7 +154,8 @@ class ImplicitAlternatingLeastSquaresRecommender(Recommender):
                 )
                 self._using_gpu = False
                 self._model = self._create_model(use_gpu=False)
-                self._model.fit(csr)
+                with _limit_blas_threads():
+                    self._model.fit(csr)
             else:
                 raise
 
@@ -142,8 +174,8 @@ class ImplicitAlternatingLeastSquaresRecommender(Recommender):
             indices = tensor_data.indices() if callable(tensor_data.indices) else tensor_data.indices
             if torch.is_tensor(indices):
                 indices = indices.t().cpu().numpy()
-            row_indices = tuple(indices[:, 0])
-            column_indices = tuple(indices[:, 1])
+            row_indices = indices[:, 0]
+            column_indices = indices[:, 1]
             vals = tensor_data.values() if callable(tensor_data.values) else tensor_data.values
             if torch.is_tensor(vals):
                 vals = vals.cpu().numpy()
@@ -161,15 +193,26 @@ class ImplicitAlternatingLeastSquaresRecommender(Recommender):
 
         return mean_squared_error(target_values, prediction_values)
 
-    def predict(self, method: PredictionMethod = PredictionMethod.DOT) -> np.ndarray:
+    def predict(self, method: PredictionMethod = PredictionMethod.DOT, **kwargs) -> np.ndarray:
         assert self._model is not None
-        return calculate_predicted_matrix(
+        result = calculate_predicted_matrix(
             self._resolve_factors(self._model.user_factors), self._resolve_factors(self._model.item_factors), method
         )
+        if torch.is_tensor(result):
+            result = result.cpu().numpy()
+        return result
 
-    def predict_new_entity(self, entity, method: PredictionMethod = PredictionMethod.DOT):
+    def predict_new_entity(self, entity, method: PredictionMethod = PredictionMethod.DOT, **kwargs) -> np.ndarray:
         if hasattr(entity, 'toarray'):
             entity = entity.toarray()
         if hasattr(entity, 'numpy'):
             entity = entity.numpy()
-        return self._model.recommend(0, sparse.csr_matrix(entity), N=entity.shape[1])
+        result = self._model.recommend(0, sparse.csr_matrix(entity), N=entity.shape[1])
+        if torch.is_tensor(result):
+            result = result.cpu().numpy()
+        return result
+
+
+def _is_missing_cuda_extension(exc: BaseException) -> bool:
+    message = str(exc)
+    return "No CUDA extension has been built" in message

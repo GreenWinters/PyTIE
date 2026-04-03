@@ -1,7 +1,14 @@
 import numpy as np
 import pandas as pd
+import os
 import torch
 from typing import Optional
+
+
+def _check_sparse_invariants_enabled() -> bool:
+    """Returns whether sparse invariant checks should be enabled."""
+    value = os.getenv("TIE_CHECK_SPARSE_INVARIANTS", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 class ReportTechniqueMatrix:
@@ -93,7 +100,11 @@ class ReportTechniqueMatrix:
         indices = torch.tensor(self._indices, dtype=torch.long).t()
         values = torch.tensor(self._values, dtype=torch.float32)
         shape = (self.m, self.n)
-        tensor = torch.sparse_coo_tensor(indices, values, shape)
+        if hasattr(torch.sparse, "check_sparse_tensor_invariants"):
+            with torch.sparse.check_sparse_tensor_invariants(_check_sparse_invariants_enabled()):
+                tensor = torch.sparse_coo_tensor(indices, values, shape)
+        else:
+            tensor = torch.sparse_coo_tensor(indices, values, shape)
         if device is not None:
             return tensor.to(device)
         return tensor
