@@ -10,6 +10,8 @@ Based on original code from: https://github.com/center-for-threat-informed-defen
 Significant changes made for research/development purposes.
 See LICENSE and README for details.
 '''
+from typing import Type
+
 import argparse
 import json
 import os
@@ -20,18 +22,28 @@ import pandas as pd
 import sklearn.manifold
 import src.tie.recommender
 import torch
+try:
+    from implicit.gpu.als import AlternatingLeastSquares
+    _IMPLICIT_GPU_IMPORT_ERROR = None
+except Exception as exc:  # implicit raises RuntimeError when CUDA extension is missing
+    AlternatingLeastSquares = None
+    _IMPLICIT_GPU_IMPORT_ERROR = exc
 from src.tie.constants import PredictionMethod
 from src.tie.engine import TechniqueInferenceEngine
 from src.tie.matrix_builder import ReportTechniqueMatrixBuilder
 from src.tie.recommender import (
     BPRRecommender,
     FactorizationRecommender,
+    ImplicitAlternatingLeastSquaresRecommender,
     ImplicitBPRRecommender,
+    ImplicitMatrixFactorizationBaseRecommender,
     ImplicitWalsRecommender,
     Recommender,
     TopItemsRecommender,
     WalsRecommender,
 )
+
+DEFAULT_DEVICE: torch.device | None = None
 
 
 def convert_types(obj):
@@ -43,6 +55,13 @@ def convert_types(obj):
         return obj.item()
     else:
         return obj
+
+
+OILRIG_TECHNIQUES = frozenset({
+    "T1047", "T1059.005", "T1124", "T1082",
+    "T1497.001", "T1053.005", "T1027", "T1105",
+    "T1070.004", "T1059.003", "T1071.001"
+})
 
 def save_metrics_json(metrics, model_name, timestamp):
     os.makedirs("tie_model", exist_ok=True)
@@ -87,13 +106,23 @@ def get_device():
         return torch.device("cpu")
 
 
-def to_tensor(data):
+def set_default_device(selected_device: torch.device | None):
+    """Set the module default device used by helper utilities."""
+    global DEFAULT_DEVICE
+    DEFAULT_DEVICE = selected_device
+
+
+def to_tensor(data, *, device: torch.device | None = None):
+    target_device = device if device is not None else DEFAULT_DEVICE
     if isinstance(data, np.ndarray):
-        return torch.tensor(data, dtype=torch.float32).to(device)
+        tensor = torch.tensor(data, dtype=torch.float32)
     elif hasattr(data, 'X'):  # Example for custom class
-        return torch.tensor(data.X, dtype=torch.float32).to(device)
+        tensor = torch.tensor(data.X, dtype=torch.float32)
     else:
         return data  # If already tensor or compatible
+    if target_device is not None:
+        tensor = tensor.to(target_device)
+    return tensor
 
 def load_data(device):
     """
@@ -112,13 +141,13 @@ def load_data(device):
     )
     training_data, test_data, validation_data = data_builder.build_train_test_validation(test_ratio, validation_ratio)
     # Move to device if possible
-    training_data = to_tensor(training_data)
-    test_data = to_tensor(test_data)
-    validation_data = to_tensor(validation_data)
+    training_data = to_tensor(training_data, device=device)
+    test_data = to_tensor(test_data, device=device)
+    validation_data = to_tensor(validation_data, device=device)
     return training_data, test_data, validation_data, enterprise_attack_filepath
 
 
-def test_multiple_embedding_dimensions(model_class: Recommender, method: PredictionMethod, training_data, validation_data, test_data, enterprise_attack_filepath, out_file: str, device=None, **kwargs):
+def test_multiple_embedding_dimensions(model_class: Type[Recommender], method: PredictionMethod, training_data, validation_data, test_data, enterprise_attack_filepath, out_file: str, device=None, **kwargs):
     """Runs model_class at multiple embedding dimensions and saves results (PyTorch refactor)."""
     assert len(out_file) > 0
     results = []
@@ -176,6 +205,7 @@ def test_multiple_embedding_dimensions(model_class: Recommender, method: Predict
     print(f"{model_class.__name__}: All embedding dimension sweeps complete. Saving results to {out_file}")
     results_dataframe = pd.DataFrame(results)
     results_dataframe.to_csv(out_file)
+    return results
 
 
 def make_tsne_embeddings(embeddings: np.ndarray):
@@ -208,10 +238,10 @@ def visualize_embeddings(tie):
     '''
     Visualize Embeddings
 
-    Because the model's reports exist in an embedding dimension greater than 4, it 
-    can be difficult to visualize how the reports are clustered. This cell uses the currently 
-    trained model (from section 4) to plot a 2-dimensional representation of the model's 
-    embeddings using t-SNE. In the chart below, reports that are far apart in the 4-dimensional 
+    Because the model's reports exist in an embedding dimension greater than 4, it
+    can be difficult to visualize how the reports are clustered. This cell uses the currently
+    trained model (from section 4) to plot a 2-dimensional representation of the model's
+    embeddings using t-SNE. In the chart below, reports that are far apart in the 4-dimensional
     space are similarly distant in the 2-dimensional space.
 
     If you wish to visualize how techniques are clustered (instead of reports), switch:
@@ -232,7 +262,7 @@ def visualize_embeddings(tie):
     plt.show()
 
 
-def run_experiment(model_class, method, training_data, validation_data, test_data, enterprise_attack_filepath, embedding_dimension, k, hyperparameters, label=None, device=None):
+def run_experiment(model_class: Type[Recommender], method, training_data, validation_data, test_data, enterprise_attack_filepath, embedding_dimension, k, hyperparameters, label=None, device=None):
     """
     Train and evaluate a single model (PyTorch refactor).
     """
@@ -280,11 +310,6 @@ def compare_models(training_data, validation_data, test_data, enterprise_attack_
     """
     Train and compare all supported models. Returns best model if return_best=True.
     """
-    oilrig_techniques = {
-        "T1047", "T1059.005", "T1124", "T1082",
-        "T1497.001", "T1053.005", "T1027", "T1105",
-        "T1070.004", "T1059.003", "T1071.001"
-    }
     k = 20
     embedding_dimension = 10
     model_configs = [
@@ -305,7 +330,7 @@ def compare_models(training_data, validation_data, test_data, enterprise_attack_
         print(f"\nModel: {label}")
         print(metrics)
         if hasattr(tie, "predict_for_new_report"):
-            preds = tie.predict_for_new_report(oilrig_techniques, **hyperparams)
+            preds = tie.predict_for_new_report(OILRIG_TECHNIQUES, **hyperparams)
             print(preds)
         results.append(metrics)
         ties.append((tie, metrics))
@@ -376,7 +401,7 @@ def experiment_bpr(training_data, validation_data, test_data, enterprise_attack_
             device=device,
             epochs=[20],
             learning_rate=[0.00001, 0.00005, 0.0001, 0.001],
-            regularization=[0., 0.0001, 0.001, 0.01],
+            regularization_coefficient=[0., 0.0001, 0.001, 0.01],
         )
         for res in sweep_results:
             if 'error' in res:
@@ -400,17 +425,12 @@ def experiment_bpr(training_data, validation_data, test_data, enterprise_attack_
 
 def experiment_topitems(training_data, validation_data, test_data, enterprise_attack_filepath, device=None):
     """
-    Run Top Items Recommender experiment (PyTorch refactor). 
+    Run Top Items Recommender experiment (PyTorch refactor).
     The "Top Items" Recommender is a (naive) model that recommends Techniques in order of their frequency in the dataset.
 
     This model acts as a baseline and allows us to compare how other models perform against simply guessing the most popular ATT&CK Techniques.
     """
     print("\n[TopItems] Starting TopItems embedding dimension experiment...")
-    oilrig_techniques = {
-        "T1047", "T1059.005", "T1124", "T1082",
-        "T1497.001", "T1053.005", "T1027", "T1105",
-        "T1070.004", "T1059.003", "T1071.001"
-    }
     embedding_dimension = 10
     k = 20
     best_hyperparameters = {'gravity_coefficient': 0.001, 'regularization_coefficient': 0.5, 'epochs': 1000, 'learning_rate': 100.0}
@@ -446,7 +466,7 @@ def experiment_topitems(training_data, validation_data, test_data, enterprise_at
             recall = tie.recall(k=k)
             ndcg = tie.normalized_discounted_cumulative_gain(k=k)
             print(f"[TopItems] Precision@{k}: {precision}, Recall@{k}: {recall}, NDCG@{k}: {ndcg}")
-            new_report_predictions = tie.predict_for_new_report(oilrig_techniques, **best_hyperparameters)
+            new_report_predictions = tie.predict_for_new_report(OILRIG_TECHNIQUES, **best_hyperparameters)
             print("[TopItems] New report predictions:")
             print(new_report_predictions)
             results.append({
@@ -476,11 +496,6 @@ def experiment_factorization(training_data, validation_data, test_data, enterpri
     Use .fit() if you want to explicitly set the model's hyperparameters. Use .fit_with_validation() if you want TIE to choose the best hyperparameters for you.
     """
     print("\n[Factorization Recommender] Starting Factorization embedding dimension experiment...")
-    oilrig_techniques = {
-        "T1047", "T1059.005", "T1124", "T1082",
-        "T1497.001", "T1053.005", "T1027", "T1105",
-        "T1070.004", "T1059.003", "T1071.001"
-    }
     embedding_dimension = 10
     k = 20
     best_hyperparameters = {'gravity_coefficient': 0.001, 'regularization_coefficient': 0.001, 'epochs': 10, 'learning_rate': 1.0}
@@ -583,7 +598,7 @@ def experiment_implicitWALS(training_data, validation_data, test_data, enterpris
             recall = tie.recall(k=k)
             ndcg = tie.normalized_discounted_cumulative_gain(k=k)
             print(f"[ImplicitWALS] Precision@{k}: {precision}, Recall@{k}: {recall}, NDCG@{k}: {ndcg}")
-            new_report_predictions = tie.predict_for_new_report(oilrig_techniques, **best_hyperparameters)
+            new_report_predictions = tie.predict_for_new_report(OILRIG_TECHNIQUES, **best_hyperparameters)
             print("[ImplicitWALS] New report predictions:")
             print(new_report_predictions)
             results.append({
@@ -674,10 +689,133 @@ def experiment_implicitBPR(training_data, validation_data, test_data, enterprise
     return results
 
 
+def experiment_implicit_alternating_least_squares(training_data, validation_data, test_data, enterprise_attack_filepath, device=None):
+    """Run the GPU-backed implicit ALS experiment."""
+    print("\n[ImplicitALS] Starting Implicit Alternating Least Squares experiment...")
+    embedding_dimension = 10
+    k = 20
+    best_hyperparameters = {}
+    error_count = 0
+    results = []
+    try:
+        td = to_tensor(training_data)
+        vd = to_tensor(validation_data)
+        tsd = to_tensor(test_data)
+        model = ImplicitAlternatingLeastSquaresRecommender(
+            m=training_data.m,
+            n=training_data.n,
+            k=embedding_dimension,
+            regularization=0.01,
+            alpha=0.5,
+            iterations=20,
+        )
+        tie = TechniqueInferenceEngine(
+            training_data=td,
+            validation_data=vd,
+            test_data=tsd,
+            model=model,
+            prediction_method=PredictionMethod.COSINE,
+            enterprise_attack_filepath=enterprise_attack_filepath,
+        )
+        try:
+            mse = tie.fit(**best_hyperparameters)
+            print(f"[ImplicitALS] Training complete. MSE: {mse}")
+            precision = tie.precision(k=k)
+            recall = tie.recall(k=k)
+            ndcg = tie.normalized_discounted_cumulative_gain(k=k)
+            print(f"[ImplicitALS] Precision@{k}: {precision}, Recall@{k}: {recall}, NDCG@{k}: {ndcg}")
+            new_report_predictions = tie.predict_for_new_report(OILRIG_TECHNIQUES, **best_hyperparameters)
+            print("[ImplicitALS] New report predictions:")
+            print(new_report_predictions)
+            results.append({
+                "mse": mse,
+                "precision": precision,
+                "recall": recall,
+                "ndcg": ndcg,
+                "status": "success"
+            })
+            save_model(model, 'implicit_als', 'ImplicitAlternatingLeastSquares')
+        except Exception as e:
+            error_count += 1
+            print(f"[ImplicitALS] Error during training: {e}")
+            results.append({"error": str(e), "status": "error"})
+            if error_count > 5:
+                print("[ImplicitALS] Aborting experiment: more than five errors encountered.")
+    except Exception as e:
+        results.append({"error": str(e), "status": "experiment_aborted"})
+        print(f"[ImplicitALS] Experiment aborted due to error: {e}")
+    return results
+
+
+def experiment_implicit_matrix_factorization_base(training_data, validation_data, test_data, enterprise_attack_filepath, device=None):
+    """Run the GPU-backed MatrixFactorizationBase experiment."""
+    print("\n[ImplicitMatrixFactorizationBase] Starting MatrixFactorizationBase experiment...")
+    embedding_dimension = 10
+    k = 20
+    best_hyperparameters = {}
+    error_count = 0
+    results = []
+    try:
+        td = to_tensor(training_data)
+        vd = to_tensor(validation_data)
+        tsd = to_tensor(test_data)
+        if AlternatingLeastSquares is None:
+            print(
+                "[ImplicitMatrixFactorizationBase] GPU ALS backend unavailable ({exc}). Using CPU implementation.".format(
+                    exc=_IMPLICIT_GPU_IMPORT_ERROR
+                )
+            )
+        model = ImplicitMatrixFactorizationBaseRecommender(
+            m=training_data.m,
+            n=training_data.n,
+            base_model=AlternatingLeastSquares,
+            factors=embedding_dimension,
+            regularization=0.01,
+            alpha=0.5,
+            iterations=20,
+        )
+        tie = TechniqueInferenceEngine(
+            training_data=td,
+            validation_data=vd,
+            test_data=tsd,
+            model=model,
+            prediction_method=PredictionMethod.COSINE,
+            enterprise_attack_filepath=enterprise_attack_filepath,
+        )
+        try:
+            mse = tie.fit(**best_hyperparameters)
+            print(f"[ImplicitMatrixFactorizationBase] Training complete. MSE: {mse}")
+            precision = tie.precision(k=k)
+            recall = tie.recall(k=k)
+            ndcg = tie.normalized_discounted_cumulative_gain(k=k)
+            print(f"[ImplicitMatrixFactorizationBase] Precision@{k}: {precision}, Recall@{k}: {recall}, NDCG@{k}: {ndcg}")
+            new_report_predictions = tie.predict_for_new_report(OILRIG_TECHNIQUES, **best_hyperparameters)
+            print("[ImplicitMatrixFactorizationBase] New report predictions:")
+            print(new_report_predictions)
+            results.append({
+                "mse": mse,
+                "precision": precision,
+                "recall": recall,
+                "ndcg": ndcg,
+                "status": "success"
+            })
+            save_model(model, 'implicit_matrix_base', 'ImplicitMatrixFactorizationBase')
+        except Exception as e:
+            error_count += 1
+            print(f"[ImplicitMatrixFactorizationBase] Error during training: {e}")
+            results.append({"error": str(e), "status": "error"})
+            if error_count > 5:
+                print("[ImplicitMatrixFactorizationBase] Aborting experiment: more than five errors encountered.")
+    except Exception as e:
+        results.append({"error": str(e), "status": "experiment_aborted"})
+        print(f"[ImplicitMatrixFactorizationBase] Experiment aborted due to error: {e}")
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Technique Inference Engine Experiments")
     parser.add_argument('--experiment', type=str, choices=[
-        'wals', 'bpr', 'topitems', 'factor', 'implicit_bpr', 'implicit_wals', 'compare'
+        'wals', 'bpr', 'topitems', 'factor', 'implicit_bpr', 'implicit_wals', 'implicit_als', 'implicit_matrix_base', 'compare'
     ], default='compare', help='Experiment to run')
     parser.add_argument('--return_best', action='store_true', help='Return best model')
     args = parser.parse_args()
@@ -685,6 +823,7 @@ def main():
     # Timestamp for all metrics
     execution_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     device = get_device()
+    set_default_device(device)
     training_data, test_data, validation_data, enterprise_attack_filepath = load_data(device)
 
     if args.experiment == 'wals':
@@ -705,6 +844,12 @@ def main():
     elif args.experiment == 'implicit_wals':
         result = experiment_implicitWALS(training_data, validation_data, test_data, enterprise_attack_filepath, device=device)
         save_metrics_json(result, "ImplicitWALS", execution_timestamp)
+    elif args.experiment == 'implicit_als':
+        result = experiment_implicit_alternating_least_squares(training_data, validation_data, test_data, enterprise_attack_filepath, device=device)
+        save_metrics_json(result, "ImplicitAlternatingLeastSquares", execution_timestamp)
+    elif args.experiment == 'implicit_matrix_base':
+        result = experiment_implicit_matrix_factorization_base(training_data, validation_data, test_data, enterprise_attack_filepath, device=device)
+        save_metrics_json(result, "ImplicitMatrixFactorizationBase", execution_timestamp)
     elif args.experiment == 'compare':
         results = compare_models(training_data, validation_data, test_data, enterprise_attack_filepath, return_best=args.return_best, device=device)
          # Save each model's metrics

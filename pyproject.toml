@@ -1,19 +1,23 @@
 [tool.poetry]
-name = "technique-inference-engine"
+name = "PyTorch-technique-inference-engine"
 version = "1.0.0"
 description = "The goal of the Technique Inference Engine (TIE) project is to, given a small set of observed MITRE ATT&CK techniques, predict the next most likely techniques."
-authors = ["Center for Threat-Informed Defense <ctid@mitre-engenuity.org>"]
+authors = ["Center for Threat-Informed Defense <ctid@mitre-engenuity.org>", "Bahirah Adewunmi <b280@umbc.edu>"]
 packages = [{ include = "tie", from = "src" }]
 license = "Apache"
 
 [tool.poetry.dependencies]
-python = ">=3.10, <3.12"
+python = ">=3.10, <3.11"
 mitreattack-python = "^3.0.2"
+numpy = "^1.26.4"
+pandas = "^2.2.2"
+scipy = "^1.12.0"
 scikit-learn = "^1.4.1.post1"
-matplotlib = "^3.8.3"
+matplotlib = "^3.9.2"
 ipykernel = "^6.29.4"
 implicit = "^0.7.2"
 tensorflow = "2.16.1"
+torch = "^2.2.2"
 pre-commit = "^3.7.1"
 
 [tool.poetry.group.dev.dependencies]

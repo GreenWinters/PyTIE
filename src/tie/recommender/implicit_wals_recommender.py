@@ -1,23 +1,47 @@
-'''
-Implicit WALs Recommender 
+"""
+Implicit WALS Recommender (CPU-only, legacy wrapper)
 
+This module implements a wrapper for the implicit library's Alternating Least Squares (ALS) matrix factorization model, providing a Weighted ALS (WALS) recommender for collaborative filtering tasks. It is designed for compatibility with the TIE framework and supports robust input handling (NumPy, PyTorch, SciPy sparse), error logging, and cold-start prediction for new entities.
+
+Key features:
+- Uses the implicit.als.AlternatingLeastSquares backend (CPU-only; no GPU acceleration).
+- Handles a variety of input formats and provides detailed error logging for experiment robustness.
+- Exposes a unified interface for fitting, predicting, evaluating, and cold-start recommendations.
+- Maintains representation invariants and provides safety from rep exposure.
+
+Limitations:
+- Deprecated: This implementation is CPU-only and significantly slower than GPU-based alternatives for large-scale experiments.
+- For GPU acceleration, consider migrating to a PyTorch or TensorFlow-based ALS implementation (e.g., torch-als, spotlight, or custom PyTorch ALS).
 
 Modified by: @GreenWinters
 Based on original code from: https://github.com/center-for-threat-informed-defense/technique-inference-engine
 Significant changes made for research/development purposes.
 See LICENSE and README for details.
-'''
-import os
+"""
 import torch
 import numpy as np
+import os
+from contextlib import nullcontext
+import warnings
+from scipy import sparse
 from implicit.als import AlternatingLeastSquares
 from scipy import sparse
 from sklearn.metrics import mean_squared_error
+try:
+    from threadpoolctl import threadpool_limits
+except Exception:
+    threadpool_limits = None
 from ..constants import PredictionMethod
 from ..utils import calculate_predicted_matrix
 from .recommender import Recommender
 
 os.environ['OPENBLAS_NUM_THREADS'] = '1'  # Fix OpenBLAS threadpool warning for performance
+
+
+def _limit_blas_threads():
+    if threadpool_limits is None:
+        return nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
 
 
 class ImplicitWalsRecommender(Recommender):
@@ -38,6 +62,7 @@ class ImplicitWalsRecommender(Recommender):
         - model is never returned
 
     TODO: The implicit library's ALS implementation is CPU-only and does not support GPU acceleration.
+    Deprecated: GPU acceleration is not available via this wrapper, so it should only be used for compatibility purposes.
     To leverage GPU, consider migrating to a PyTorch or TensorFlow-based ALS implementation (e.g., torch-als, spotlight, or custom PyTorch ALS).
     This will significantly speed up large-scale experiments and remove the current bottleneck.
     """
@@ -61,6 +86,11 @@ class ImplicitWalsRecommender(Recommender):
         # for tracking how many new users we've seen so far
         self._num_new_users = 0
         self.device = device if device is not None else torch.device('cpu')
+        warnings.warn(
+            "ImplicitWalsRecommender is deprecated because it uses the CPU-only implicit ALS implementation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._checkrep()
 
     def to(self, device):
@@ -145,12 +175,13 @@ class ImplicitWalsRecommender(Recommender):
             if not (0 < c < 1):
                 raise ValueError(f"Parameter c must be in (0,1), got {c}")
             alpha = (1 / c) - 1
-            self._model = AlternatingLeastSquares(
-                factors=self._k,
-                regularization=regularization_coefficient,
-                iterations=epochs,
-                alpha=alpha,
-            )
+            with _limit_blas_threads():
+                self._model = AlternatingLeastSquares(
+                    factors=self._k,
+                    regularization=regularization_coefficient,
+                    iterations=epochs,
+                    alpha=alpha,
+                )
             # Accepts either numpy array, PyTorch tensor, or dict with indices/values/shape
             if hasattr(data, 'indices') and hasattr(data, 'values') and hasattr(data, 'shape'):
                 tensor_data = data
@@ -176,7 +207,8 @@ class ImplicitWalsRecommender(Recommender):
                 sparse_data = sparse.csr_matrix(data.cpu().numpy())
             else:
                 raise ValueError("Unsupported data format for fit().")
-            self._model.fit(sparse_data)
+            with _limit_blas_threads():
+                self._model.fit(sparse_data)
             self._checkrep()
         except Exception as e:
             self._log_error("fit", e)

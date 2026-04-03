@@ -75,3 +75,12 @@ class Recommender(ABC):
         Returns:
             An array of predicted values for the new entity.
         """
+
+    def predict_tensor(self, device=None, **kwargs) -> torch.Tensor:
+        """Gets the model predictions as a torch tensor."""
+
+        predictions = self.predict(**kwargs)
+        tensor = torch.as_tensor(predictions, dtype=torch.float32)
+        if device is not None:
+            tensor = tensor.to(device)
+        return tensor

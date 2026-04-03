@@ -49,6 +49,23 @@ class WalsRecommender(Recommender):
         self._U = new_U
         self._V = new_V
 
+    def to(self, device) -> "WalsRecommender":
+        """Move the recommender and its embeddings to the given device."""
+
+        if device is None:
+            return self
+        target_device = torch.device(device) if not isinstance(device, torch.device) else device
+        self.device = target_device
+        self._U = self._U.to(target_device)
+        self._V = self._V.to(target_device)
+        return self
+
+    def cuda(self, device=None) -> "WalsRecommender":
+        """Convenience helper to mimic PyTorch modules."""
+
+        cuda_device = torch.device("cuda" if device is None else device)
+        return self.to(cuda_device)
+
     def _checkrep(self):
         """Asserts the rep invariant."""
         assert self._U is not None
@@ -271,10 +288,17 @@ class WalsRecommender(Recommender):
     def predict(self, method: PredictionMethod = PredictionMethod.DOT) -> np.ndarray:
         """Gets the model predictions (always returns CPU numpy array)."""
         self._checkrep()
-        pred = calculate_predicted_matrix(self._U, self._V, method)
-        if torch.is_tensor(pred):
-            pred = pred.detach().cpu().numpy()
-        return pred
+        predictions = self.predict_tensor(method)
+        return predictions.detach().cpu().numpy()
+
+    def predict_tensor(
+        self,
+        method: PredictionMethod = PredictionMethod.DOT,
+    ) -> torch.Tensor:
+        """Gets the model predictions as a torch tensor."""
+        self._checkrep()
+        tensor_predictions = calculate_predicted_matrix(self._U, self._V, method)
+        return tensor_predictions.to(self.device)
 
     def predict_new_entity(
         self,

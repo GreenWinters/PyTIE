@@ -115,48 +115,57 @@ class BPRRecommender(Recommender):
             i is an array of item indices with an observation for that user,
             and j is an array of item indices with no observation for that user.
         """
-        assert num_samples > 0
-        # Ensure data is a torch tensor on the correct device
-        if isinstance(data, np.ndarray):
-            data = torch.tensor(data, dtype=torch.float32, device=self.device)
-        elif not torch.is_tensor(data):
-            data = torch.tensor(np.array(data), dtype=torch.float32, device=self.device)
-        else:
-            data = data.to(self.device)
+        if num_samples <= 0:
+            raise ValueError("num_samples must be a positive integer")
 
-        m, n = data.shape
-        sample_user_probability = torch.tensor(self._calculate_sample_user_probability(data.cpu().numpy()), dtype=torch.float32, device=self.device)
-        num_items_per_user = torch.sum(data, dim=1).float()
-        num_items_per_user[num_items_per_user == 0.0] = float('nan')
-        assert num_items_per_user.shape[0] == m
-        sample_item_probability = torch.nan_to_num(data / num_items_per_user.unsqueeze(1))
-        joint_user_item_probability = sample_user_probability.unsqueeze(1) * sample_item_probability
-        assert joint_user_item_probability.shape == (m, n)
-        flattened_probability = joint_user_item_probability.flatten()
-        # Move to CPU for numpy random choice
-        flattened_probability_np = flattened_probability.cpu().numpy()
-        u_i = np.random.choice(np.arange(m * n), size=(num_samples,), p=flattened_probability_np)
-        all_u = u_i // n
-        all_i = u_i % n
-        non_observations = (1 - data).cpu().numpy()
-        unique_users, counts = np.unique(all_u, return_counts=True)
-        value_to_count = dict(zip(unique_users, counts))
-        u_to_j = {}
-        for u, count in value_to_count.items():
-            potential_j = non_observations[u, :]
-            potential_j_sum = np.sum(potential_j)
-            if potential_j_sum == 0:
-                # If no zero entries, fallback to uniform
-                all_j_for_user = np.random.choice(n, size=count, replace=True)
+        if isinstance(data, np.ndarray):
+            tensor_data = torch.tensor(data, dtype=torch.float32, device=self.device)
+        elif torch.is_tensor(data):
+            tensor_data = data.to(dtype=torch.float32, device=self.device)
+        else:
+            tensor_data = torch.tensor(np.array(data), dtype=torch.float32, device=self.device)
+
+        m, n = tensor_data.shape
+        sample_user_probability = self._calculate_sample_user_probability(tensor_data)
+        num_items_per_user = torch.sum(tensor_data, dim=1).float()
+        num_items_per_user = torch.where(
+            num_items_per_user == 0,
+            torch.full_like(num_items_per_user, float("nan")),
+            num_items_per_user,
+        )
+        sample_item_probability = torch.nan_to_num(
+            tensor_data / num_items_per_user.unsqueeze(1)
+        )
+
+        joint_user_item_probability = (
+            sample_user_probability.unsqueeze(1) * sample_item_probability
+        )
+        flattened_probability = joint_user_item_probability.reshape(-1)
+        total_probability = flattened_probability.sum()
+        if total_probability == 0:
+            flattened_probability = torch.full_like(flattened_probability, 1.0 / flattened_probability.numel())
+        else:
+            flattened_probability = flattened_probability / total_probability
+
+        sampled = torch.multinomial(flattened_probability, num_samples=num_samples, replacement=True)
+        all_u = (sampled // n).to(torch.long)
+        all_i = (sampled % n).to(torch.long)
+
+        non_observations = (tensor_data == 0).to(torch.float32)
+        all_j = torch.empty_like(all_u)
+        unique_users, counts = torch.unique(all_u, return_counts=True)
+        for user, count in zip(unique_users.tolist(), counts.tolist()):
+            row = non_observations[user]
+            row_sum = row.sum()
+            if row_sum == 0:
+                choices = torch.randint(0, n, size=(count,), device=self.device)
             else:
-                all_j_for_user = np.random.choice(n, size=count, replace=True, p=potential_j / potential_j_sum)
-            u_to_j[u] = list(all_j_for_user)
-        all_j = []
-        for u in all_u:
-            j = u_to_j[u].pop()
-            all_j.append(j)
-        assert len(all_u) == len(all_j) == len(all_i)
-        return np.array(all_u), np.array(all_i), np.array(all_j)
+                probs = row / row_sum
+                choices = torch.multinomial(probs, num_samples=count, replacement=True)
+            positions = (all_u == user).nonzero(as_tuple=True)[0]
+            all_j[positions] = choices
+
+        return all_u, all_i, all_j
 
 
 
@@ -207,13 +216,7 @@ class BPRRecommender(Recommender):
         for epoch in range(epochs):
             epoch_start = time.time()
             # Vectorized negative sampling
-            data_np = data.cpu().numpy()
-            all_u, all_i, all_j = self._sample_dataset(data_np, num_samples=num_samples_per_epoch)
-
-            # Convert to torch tensors
-            all_u = torch.tensor(all_u, dtype=torch.long, device=self.device)
-            all_i = torch.tensor(all_i, dtype=torch.long, device=self.device)
-            all_j = torch.tensor(all_j, dtype=torch.long, device=self.device)
+            all_u, all_i, all_j = self._sample_dataset(data, num_samples=num_samples_per_epoch)
 
             num_batches = math.ceil(num_samples_per_epoch / batch_size)
             for batch_idx in range(num_batches):
@@ -275,74 +278,33 @@ class BPRRecommender(Recommender):
         else:
             test_data = torch.tensor(np.array(test_data), dtype=torch.float32, device=self.device)
 
-        pred_np = self.predict(method)
-        if isinstance(pred_np, torch.Tensor):
-            pred = pred_np.detach().clone().to(torch.float32).to(self.device)
-        else:
-            pred = torch.tensor(pred_np, dtype=torch.float32, device=self.device)
+        pred = self.predict_tensor(method)
         indices = torch.nonzero(test_data)
         predictions = pred[indices[:, 0], indices[:, 1]]
         true_values = test_data[indices[:, 0], indices[:, 1]]
         mse = torch.mean((true_values - predictions) ** 2).item()
         return mse
-        flattened_probability = joint_user_item_probability.flatten("C")
-        u_i = np.random.choice(
-            np.arange(m * n), size=(num_samples,), p=flattened_probability
-        )
-
-        all_u = u_i // n
-        all_i = u_i % n
-        assert (all_i < 611).all()
-
-        non_observations = 1 - data
-
-        unique_users, counts = np.unique(all_u, return_counts=True)
-        value_to_count = dict(zip(unique_users, counts))
-
-        u_to_j = {}
-
-        # for each u
-        for u, count in value_to_count.items():
-            # get
-            potential_j = non_observations[u, :]
-
-            all_j_for_user = np.random.choice(
-                n, size=count, replace=True, p=potential_j / np.sum(potential_j)
-            )
-
-            u_to_j[u] = all_j_for_user.tolist()
-
-        all_j = []
-
-        for u in all_u:
-            j = u_to_j[u].pop()
-            all_j.append(j)
-
-        assert len(all_u) == len(all_j) == len(all_i)
-
-        return all_u, all_i, all_j
 
 
-    def _calculate_sample_user_probability(self, data: np.ndarray) -> np.array:
+    def _calculate_sample_user_probability(self, data: torch.Tensor) -> torch.Tensor:
         """Gets the sample probability for each user.
 
         Args:
-            data: An mxn matrix of observations.
+            data: An mxn tensor of observations on the device.
 
         Returns:
-            A length m array containing the probability of sampling each entity.
+            A length m tensor containing the probability of sampling each entity.
         """
         m, n = data.shape
-        data = np.nan_to_num(data)
+        assert m > 0
+        data = torch.nan_to_num(data)
 
-        observations_per_user = np.sum(data, axis=1)
-        assert observations_per_user.shape == (m,)
-
+        observations_per_user = torch.sum(data, dim=1)
         samples_per_user = observations_per_user * (n - observations_per_user)
-        sample_user_probability = samples_per_user / np.sum(samples_per_user)
-        assert sample_user_probability.shape == (m,)
-
-        return sample_user_probability
+        total = samples_per_user.sum()
+        if total == 0:
+            return torch.full((m,), 1.0 / m, device=self.device)
+        return samples_per_user / total
 
 
     def _predict_for_single_entry(self, u, i) -> float:
@@ -363,10 +325,16 @@ class BPRRecommender(Recommender):
             An mxn array of values.
         """
         self._checkrep()
-        # Ensure tensors are on CPU before passing to numpy-based utils
-        U_cpu = self._U.cpu() if self._U.is_cuda else self._U
-        V_cpu = self._V.cpu() if self._V.is_cuda else self._V
-        return calculate_predicted_matrix(U_cpu, V_cpu, method)
+        predictions = self.predict_tensor(method)
+        return predictions.detach().cpu().numpy()
+
+    def predict_tensor(
+        self,
+        method: PredictionMethod = PredictionMethod.DOT,
+    ) -> torch.Tensor:
+        """Gets the model predictions as a torch tensor."""
+        self._checkrep()
+        return calculate_predicted_matrix(self._U, self._V, method).to(self.device)
 
 
     def predict_new_entity(
@@ -382,60 +350,68 @@ class BPRRecommender(Recommender):
         Ensures entity is always 2D (m, n) for _sample_dataset compatibility.
         GPU compatible and accurate.
         """
-        # Accepts either a PyTorch sparse tensor, dense tensor, or numpy array
-        if isinstance(entity, torch.Tensor):
-            if entity.is_sparse:
-                entity = entity.to_dense()
-            entity = entity.cpu().numpy()
+        if torch.is_tensor(entity):
+            tensor_entity = entity.to(dtype=torch.float32, device=self.device)
+            if tensor_entity.is_sparse:
+                tensor_entity = tensor_entity.to_dense()
         elif hasattr(entity, 'toarray'):
-            entity = entity.toarray()
+            tensor_entity = torch.tensor(
+                entity.toarray(), dtype=torch.float32, device=self.device
+            )
         else:
-            entity = np.array(entity)
-
-        # Ensure entity is 2D (m, n) for _sample_dataset
-        if entity.ndim == 1:
-            entity_reshaped = entity.reshape(1, -1)
-        elif entity.ndim == 2:
-            entity_reshaped = entity
-        else:
-            raise ValueError(f"Entity must be 1D or 2D, got shape {entity.shape}")
-
-        # Ensure self._V is on CPU for numpy ops
-        V_cpu = self._V.cpu().numpy() if self._V.is_cuda else self._V.numpy()
-
-        num_iterations = epochs * entity_reshaped.shape[0] * entity_reshaped.shape[1]
-
-        new_entity_embedding = np.random.normal(
-            loc=0, scale=math.sqrt(1 / self._U.shape[1]), size=(1, self._U.shape[1])
-        )
-
-        try:
-            _, all_i, all_j = self._sample_dataset(entity_reshaped, num_samples=num_iterations)
-        except Exception as e:
-            print(f"[BPRRecommender][ERROR] _sample_dataset failed: {e}. entity_reshaped shape: {entity_reshaped.shape}")
-            # Return zeros for predictions if sampling fails
-            return np.zeros(V_cpu.shape[0])
-
-        for iteration_count in range(num_iterations):
-            i = all_i[iteration_count]
-            j = all_j[iteration_count]
-
-            x_ui = np.dot(new_entity_embedding, V_cpu[i, :])
-            x_uj = np.dot(new_entity_embedding, V_cpu[j, :])
-            x_uij = x_ui - x_uj
-
-            sigmoid_derivative = (math.e ** (-x_uij)) / (1 + math.e ** (-x_uij))
-
-            d_w = V_cpu[i, :] - V_cpu[j, :]
-
-            new_entity_embedding += learning_rate * (
-                sigmoid_derivative * d_w
-                - (regularization_coefficient * new_entity_embedding)
+            tensor_entity = torch.tensor(
+                np.array(entity), dtype=torch.float32, device=self.device
             )
 
-        return np.squeeze(
-            calculate_predicted_matrix(new_entity_embedding, V_cpu, method)
+        if tensor_entity.ndim == 1:
+            tensor_entity = tensor_entity.reshape(1, -1)
+        elif tensor_entity.ndim != 2:
+            raise ValueError(f"Entity must be 1D or 2D, got shape {tuple(tensor_entity.shape)}")
+
+        num_iterations = int(
+            epochs * tensor_entity.shape[0] * tensor_entity.shape[1]
         )
+        embedding_dim = self._U.shape[1]
+        init_stddev = math.sqrt(1 / embedding_dim)
+        new_entity_embedding = torch.normal(
+            mean=0.0,
+            std=init_stddev,
+            size=(embedding_dim,),
+            device=self.device,
+        )
+
+        if num_iterations > 0:
+            try:
+                _, all_i, all_j = self._sample_dataset(
+                    tensor_entity, num_samples=num_iterations
+                )
+            except Exception as e:
+                print(
+                    f"[BPRRecommender][ERROR] _sample_dataset failed: {e}. "
+                    f"entity shape: {tuple(tensor_entity.shape)}"
+                )
+                return np.zeros(self._V.shape[0])
+
+            for iteration_count in range(num_iterations):
+                i = all_i[iteration_count]
+                j = all_j[iteration_count]
+
+                x_ui = torch.dot(new_entity_embedding, self._V[i])
+                x_uj = torch.dot(new_entity_embedding, self._V[j])
+                x_uij = x_ui - x_uj
+
+                sigmoid_derivative = torch.exp(-x_uij) / (1 + torch.exp(-x_uij))
+
+                d_w = self._V[i] - self._V[j]
+                new_entity_embedding += learning_rate * (
+                    sigmoid_derivative * d_w
+                    - regularization_coefficient * new_entity_embedding
+                )
+
+        predictions_tensor = calculate_predicted_matrix(
+            new_entity_embedding.unsqueeze(0), self._V, method
+        )
+        return np.squeeze(predictions_tensor.detach().cpu().numpy())
 
 
 Recommender.register(BPRRecommender)

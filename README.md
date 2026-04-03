@@ -44,14 +44,33 @@ The core functionality of `tie_model.py` is to orchestrate the training, evaluat
 		- **Weaknesses:** Assumes linear relationships, less effective for highly non-linear data, sensitive to sparsity.
 		- **Prediction Target:** Predicts technique relevance for each report/entity.
 		- **Output Interpretation:** Higher scores indicate stronger predicted association; top-k techniques are recommended.
-	- Implicit BPR/WALS (using the implicit library)
-		- **Description:** GPU-accelerated implementations of BPR and WALS optimized for large-scale, implicit feedback data. Uses efficient sparse matrix operations.
-		- **Strengths:** Highly scalable, fast training on GPU, robust to missing data.
-		- **Weaknesses:** Requires careful tuning, less interpretable than standard matrix factorization, may be sensitive to data distribution.
-		- **Prediction Target:** Ranks or scores ATT&CK techniques for each report/entity.
-		- **Output Interpretation:** Techniques with highest scores/ranks are recommended for further analysis.
+	- Implicit BPR (via implicit.gpu)
+		- **Description:** GPU-accelerated Bayesian Personalized Ranking implemented through the `implicit.gpu.bpr` backend. Trains directly on CUDA tensors and runs efficiently with the conda-forge GPU build (`conda install -c conda-forge implicit implicit-proc=*=gpu`).
+		- **Strengths:** Highly scalable ranking, runs on GPU, robust to missing data.
+		- **Weaknesses:** Requires careful tuning, less interpretable than standard matrix factorization, sensitive to data distribution.
+		- **Prediction Target:** Ranks ATT&CK techniques for each report/entity.
+		- **Output Interpretation:** Techniques with highest predicted rank are most likely to be used by the adversary.
+	- Implicit WALS (deprecated CPU wrapper)
+		- **Description:** Compatibility shim for the CPU-only `implicit.als` implementation. Maintained for backwards compatibility but emits a deprecation warning and should be avoided when GPU acceleration is required.
+		- **Strengths:** Matches legacy behavior.
+		- **Weaknesses:** CPU-only, significantly slower, no GPU acceleration, less future proof.
+	- Implicit ALS (GPU/CPU fallback)
+		- **Description:** Alternating Least Squares recommender using `implicit.gpu.als` when CUDA extensions are available, with automatic fallback to CPU ALS.
+		- **Strengths:** Efficient on sparse implicit-feedback data, supports GPU acceleration, robust fallback behavior.
+		- **Weaknesses:** Backend/library compatibility can impact runtime, and CPU fallback is substantially slower on large runs.
+		- **Prediction Target:** Predicts and ranks ATT&CK technique relevance for each report/entity from learned latent factors.
+		- **Output Interpretation:** Higher scores indicate stronger predicted relevance; top-k techniques are prioritized.
+	- Implicit MatrixFactorizationBase (GPU/CPU fallback)
+		- **Description:** Adapter around `implicit` matrix factorization base models, preferring GPU implementations when available and falling back to CPU when needed.
+		- **Strengths:** Flexible backend selection, consistent recommender interface, resilient to missing CUDA extensions.
+		- **Weaknesses:** Performance depends on backend and environment setup; fallback paths can increase runtime.
+		- **Prediction Target:** Learns user/report and item/technique latent representations to score likely technique associations.
+		- **Output Interpretation:** Scores are used for ranking; highest-ranked techniques are recommended as likely next actions.
 - **Device Management:**
-	- Models and data are moved to GPU if available, otherwise CPU.
+	- TIE detects CUDA availability at runtime and chooses the execution device automatically.
+	- For PyTorch-based recommenders, model parameters and tensors are explicitly moved to the selected device.
+	- For `implicit`-based recommenders, GPU backends are used when available and compatible; otherwise, code falls back to CPU implementations.
+	- Device-aware training means the same experiment interface runs across heterogeneous environments while preserving comparable outputs/metrics.
 - **Hyperparameter Sweeps:**
 	- Automated sweeps over embedding dimensions and hyperparameters, with validation-based selection of best configurations.
 - **Training Loop:**
@@ -87,15 +106,36 @@ Compared to the original MITRE Engenuity Center for Threat-Informed Defense repo
 
 ## Poetry File: Function and Purpose
 
-This repository uses a `pyproject.toml` file managed by [Poetry](https://python-poetry.org/) for dependency management and packaging. Poetry simplifies installation, version control, and reproducibility of Python environments, ensuring that all required libraries and their versions are tracked and easily installed. To set up the environment, run `poetry install` in the repository root.
+This repository uses a `pyproject.toml` file managed by [Poetry](https://python-poetry.org/) for dependency management and packaging. Poetry simplifies installation, version control, and reproducibility of Python environments, ensuring that all required libraries and their versions are tracked and easily installed.
+
+For reproducible GPU workflows, this project also includes `environment.yml` (Conda) to define the CUDA-aligned base environment used by the experiments.
+
+Recommended setup sequence:
+
+1. Create and activate the Conda environment from `environment.yml`:
+	```sh
+	conda env create -f technique_inference_engine/environment.yml
+	conda activate tie_gpu
+	```
+2. Install project dependencies with Poetry:
+	```sh
+	poetry install
+	```
+3. Ensure GPU-enabled `implicit` artifacts are installed (if not already present in the active env):
+	```sh
+	conda install -c conda-forge implicit implicit-proc=*=gpu
+	```
+
+In short: `environment.yml` establishes the system-level Python/CUDA baseline, while Poetry (`pyproject.toml`) manages project-level Python package versions and lockfile reproducibility.
 
 ---
 
 ## System Reference
 This repository was altered and tested on a multi-GPU workstation with the following configuration:
-- CPU: Intel(R) Core(TM) i9-10980XE CPU @ 3.00 GHz, 36 Cores
-- GPUs: Three NVIDIA Quadro RTX 8000
-- OS: Ubuntu 20.04.6 LTS
+- GPUs (4): NVIDIA RTX A6000, NVIDIA GeForce RTX 2080 Ti
+- OS: Ubuntu 22.04.5 LTS
+- CPU Model: Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz
+- CPU(s): 40
 
 This hardware and OS configuration enabled accelerated training and large-scale experiments for the recommender models described above.
 
