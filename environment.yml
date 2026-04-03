@@ -1,0 +1,14 @@
+name: tie_gpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - cudatoolkit=11.2
+  - numpy
+  - pandas
+  - scipy
+  - pytorch
+  - implicit=0.7.2
+  - implicit-proc=0.7.2=gpu*
+  - pip
+  - poetry

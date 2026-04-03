@@ -1,5 +1,5 @@
 '''
-Implicit BPR Recommender 
+Implicit BPR Recommender
 
 
 Modified by: @GreenWinters
@@ -10,15 +10,21 @@ See LICENSE and README for details.
 import numpy as np
 import torch
 from implicit.cpu.bpr import BayesianPersonalizedRanking as CpuBayesianPersonalizedRanking
-from implicit.gpu.bpr import BayesianPersonalizedRanking as GpuBayesianPersonalizedRanking
+try:
+    from implicit.gpu.bpr import BayesianPersonalizedRanking as GpuBayesianPersonalizedRanking
+    _GPU_IMPORT_ERROR = None
+except Exception as exc:  # implicit raises RuntimeError when CUDA extension is missing
+    GpuBayesianPersonalizedRanking = None
+    _GPU_IMPORT_ERROR = exc
 from scipy import sparse
 from sklearn.metrics import mean_squared_error
 
 from ..constants import PredictionMethod
 from ..utils import calculate_predicted_matrix
+from .recommender import Recommender
 
 
-class ImplicitBPRRecommender:
+class ImplicitBPRRecommender(Recommender):
     """
     A matrix factorization recommender model to suggest items for an entity.
 
@@ -28,13 +34,13 @@ class ImplicitBPRRecommender:
            on m entities and n items if model is None,
            or model trained on such data and with predictions for num_new_users
            if model is not None
-    
+
     Rep invariant:
        - m > 0
        - n > 0
        - k > 0
        - num_new_users >= 0
-    
+
     Safety from rep exposure:
         - k is private and immutable
         - model is never returned
@@ -62,10 +68,18 @@ class ImplicitBPRRecommender:
         self._model = None
         self._model_cls = GpuBayesianPersonalizedRanking
         self._cpu_model_cls = CpuBayesianPersonalizedRanking
-        self._using_gpu = True
+        self._using_gpu = self._model_cls is not None
+        if not self._using_gpu:
+            print(
+                "[ImplicitBPR] GPU backend unavailable ({exc}). Using CPU implementation.".format(
+                    exc=_GPU_IMPORT_ERROR
+                )
+            )
 
         self._num_new_users = 0
         self.device = device if device is not None else torch.device('cpu')
+        if self._using_gpu and not self._is_cuda_device(self.device):
+            self._using_gpu = False
 
         self._checkrep()
 
@@ -116,6 +130,8 @@ class ImplicitBPRRecommender:
             self.device = device
         else:
             self.device = torch.device('cpu')
+        if self._model_cls is None or not self._is_cuda_device(self.device):
+            self._using_gpu = False
 
         # Accepts either numpy array, PyTorch tensor, or dict with indices/values/shape
         if hasattr(data, 'indices') and hasattr(data, 'values') and hasattr(data, 'shape'):
@@ -149,10 +165,24 @@ class ImplicitBPRRecommender:
                 iterations=epochs,
             )
             self._model.fit(sparse_data)
-        except RuntimeError as exc:
-            if self._using_gpu:
+        except (RuntimeError, ValueError) as exc:
+            if self._using_gpu and _is_missing_cuda_extension(exc):
                 print(
                     "[ImplicitBPR] GPU training failed ({exc}). Falling back to CPU implementation.".format(
+                        exc=exc
+                    )
+                )
+                self._using_gpu = False
+                self._model = self._create_model(
+                    use_gpu=False,
+                    learning_rate=learning_rate,
+                    regularization=regularization_coefficient,
+                    iterations=epochs,
+                )
+                self._model.fit(sparse_data)
+            elif self._using_gpu and _is_gpu_runtime_error(exc):
+                print(
+                    "[ImplicitBPR] GPU runtime error ({exc}). Falling back to CPU implementation.".format(
                         exc=exc
                     )
                 )
@@ -272,3 +302,21 @@ class ImplicitBPRRecommender:
         avg_user_factor = np.mean(self._model.user_factors, axis=0)
         scores = np.dot(avg_user_factor, self._model.item_factors.T)
         return scores
+
+    @staticmethod
+    def _is_cuda_device(device) -> bool:
+        try:
+            torch_device = device if isinstance(device, torch.device) else torch.device(device)
+            return torch_device.type == 'cuda'
+        except (TypeError, ValueError):
+            return False
+
+
+def _is_missing_cuda_extension(exc: BaseException) -> bool:
+    message = str(exc)
+    return "No CUDA extension has been built" in message
+
+
+def _is_gpu_runtime_error(exc: BaseException) -> bool:
+    message = str(exc)
+    return "CURAND error" in message or "CUDA" in message

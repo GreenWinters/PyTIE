@@ -1,19 +1,51 @@
-"""Wrapper around implicit.gpu.matrix_factorization_base.MatrixFactorizationBase."""
+"""
+Adapter for implicit's MatrixFactorizationBase (GPU/CPU).
+
+This module provides a robust wrapper around the `implicit.gpu.matrix_factorization_base.MatrixFactorizationBase` and its CPU counterpart, enabling seamless matrix factorization for recommendation tasks with automatic device selection and fallback. It is designed to:
+
+- Prefer GPU acceleration via the implicit.gpu backend when available, but gracefully fall back to the CPU implementation if CUDA extensions are missing or runtime errors occur.
+- Support both training and inference for matrix factorization models, exposing a unified interface for fitting, predicting, recommending, and evaluating.
+- Accept input data in various formats (PyTorch tensors, NumPy arrays, SciPy sparse matrices) and ensure compatibility with the underlying backend.
+- Provide clear error messages and progress feedback when switching between GPU and CPU modes.
+
+Typical usage is within the TIE recommender framework, where this class enables scalable, device-aware matrix factorization for adversary technique inference and related tasks.
+
+@author: @GreenWinters
+"""
 
 from typing import Optional, Type
+from contextlib import nullcontext
 
 import numpy as np
 from scipy import sparse
 import torch
 from implicit.cpu.als import AlternatingLeastSquares as CpuAlternatingLeastSquares
-from implicit.gpu.als import AlternatingLeastSquares as GpuAlternatingLeastSquares
+try:
+    from implicit.gpu.als import AlternatingLeastSquares as GpuAlternatingLeastSquares
+except Exception:  # implicit raises RuntimeError when CUDA extension is missing
+    GpuAlternatingLeastSquares = None
 from implicit.cpu.matrix_factorization_base import MatrixFactorizationBase as CpuMatrixFactorizationBase
-from implicit.gpu.matrix_factorization_base import MatrixFactorizationBase as GpuMatrixFactorizationBase
+try:
+    from implicit.gpu.matrix_factorization_base import MatrixFactorizationBase as GpuMatrixFactorizationBase
+    _GPU_IMPORT_ERROR = None
+except Exception as exc:  # implicit raises RuntimeError when CUDA extension is missing
+    GpuMatrixFactorizationBase = None
+    _GPU_IMPORT_ERROR = exc
 
 from ..constants import PredictionMethod
 from ..utils import calculate_predicted_matrix
 from .recommender import Recommender
 from sklearn.metrics import mean_squared_error
+try:
+    from threadpoolctl import threadpool_limits
+except Exception:
+    threadpool_limits = None
+
+
+def _limit_blas_threads():
+    if threadpool_limits is None:
+        return nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
 
 
 def _ensure_csr(data):
@@ -53,23 +85,34 @@ class ImplicitMatrixFactorizationBaseRecommender(Recommender):
         self._model: Optional[GpuMatrixFactorizationBase | CpuMatrixFactorizationBase] = None
         self._m = m
         self._n = n
-        self._using_gpu = True
+        self._using_gpu = self._gpu_base_cls is not None and GpuMatrixFactorizationBase is not None
+        if not self._using_gpu:
+            missing_reason = _GPU_IMPORT_ERROR
+            if missing_reason is None and self._gpu_base_cls is None:
+                missing_reason = "GPU ALS backend unavailable"
+            print(
+                "[ImplicitMatrixFactorizationBase] GPU backend unavailable ({exc}). Using CPU implementation.".format(
+                    exc=missing_reason
+                )
+            )
 
     def fit(self, data, **kwargs):
         csr = _ensure_csr(data)
         try:
-            self._model = self._create_model(use_gpu=self._using_gpu)
-            self._model.fit(csr)
-        except RuntimeError as exc:
-            if self._using_gpu:
+            with _limit_blas_threads():
+                self._model = self._create_model(use_gpu=self._using_gpu)
+                self._model.fit(csr)
+        except (RuntimeError, ValueError) as exc:
+            if self._using_gpu and _is_missing_cuda_extension(exc):
                 print(
                     "[ImplicitMatrixFactorizationBase] GPU training failed ({exc}). Falling back to CPU implementation.".format(
                         exc=exc
                     )
                 )
                 self._using_gpu = False
-                self._model = self._create_model(use_gpu=False)
-                self._model.fit(csr)
+                with _limit_blas_threads():
+                    self._model = self._create_model(use_gpu=False)
+                    self._model.fit(csr)
             else:
                 raise
 
@@ -180,3 +223,8 @@ class ImplicitMatrixFactorizationBaseRecommender(Recommender):
         if vector.ndim != 1:
             raise ValueError("Entity must be a 1-dimensional vector.")
         return vector
+
+
+def _is_missing_cuda_extension(exc: BaseException) -> bool:
+    message = str(exc)
+    return "No CUDA extension has been built" in message

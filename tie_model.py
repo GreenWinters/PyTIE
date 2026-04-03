@@ -10,6 +10,8 @@ Based on original code from: https://github.com/center-for-threat-informed-defen
 Significant changes made for research/development purposes.
 See LICENSE and README for details.
 '''
+from typing import Type
+
 import argparse
 import json
 import os
@@ -20,7 +22,12 @@ import pandas as pd
 import sklearn.manifold
 import src.tie.recommender
 import torch
-from implicit.gpu.als import AlternatingLeastSquares
+try:
+    from implicit.gpu.als import AlternatingLeastSquares
+    _IMPLICIT_GPU_IMPORT_ERROR = None
+except Exception as exc:  # implicit raises RuntimeError when CUDA extension is missing
+    AlternatingLeastSquares = None
+    _IMPLICIT_GPU_IMPORT_ERROR = exc
 from src.tie.constants import PredictionMethod
 from src.tie.engine import TechniqueInferenceEngine
 from src.tie.matrix_builder import ReportTechniqueMatrixBuilder
@@ -36,6 +43,8 @@ from src.tie.recommender import (
     WalsRecommender,
 )
 
+DEFAULT_DEVICE: torch.device | None = None
+
 
 def convert_types(obj):
     if isinstance(obj, dict):
@@ -48,11 +57,11 @@ def convert_types(obj):
         return obj
 
 
-OILRIG_TECHNIQUES = {
+OILRIG_TECHNIQUES = frozenset({
     "T1047", "T1059.005", "T1124", "T1082",
     "T1497.001", "T1053.005", "T1027", "T1105",
     "T1070.004", "T1059.003", "T1071.001"
-}
+})
 
 def save_metrics_json(metrics, model_name, timestamp):
     os.makedirs("tie_model", exist_ok=True)
@@ -97,13 +106,23 @@ def get_device():
         return torch.device("cpu")
 
 
-def to_tensor(data):
+def set_default_device(selected_device: torch.device | None):
+    """Set the module default device used by helper utilities."""
+    global DEFAULT_DEVICE
+    DEFAULT_DEVICE = selected_device
+
+
+def to_tensor(data, *, device: torch.device | None = None):
+    target_device = device if device is not None else DEFAULT_DEVICE
     if isinstance(data, np.ndarray):
-        return torch.tensor(data, dtype=torch.float32).to(device)
+        tensor = torch.tensor(data, dtype=torch.float32)
     elif hasattr(data, 'X'):  # Example for custom class
-        return torch.tensor(data.X, dtype=torch.float32).to(device)
+        tensor = torch.tensor(data.X, dtype=torch.float32)
     else:
         return data  # If already tensor or compatible
+    if target_device is not None:
+        tensor = tensor.to(target_device)
+    return tensor
 
 def load_data(device):
     """
@@ -122,13 +141,13 @@ def load_data(device):
     )
     training_data, test_data, validation_data = data_builder.build_train_test_validation(test_ratio, validation_ratio)
     # Move to device if possible
-    training_data = to_tensor(training_data)
-    test_data = to_tensor(test_data)
-    validation_data = to_tensor(validation_data)
+    training_data = to_tensor(training_data, device=device)
+    test_data = to_tensor(test_data, device=device)
+    validation_data = to_tensor(validation_data, device=device)
     return training_data, test_data, validation_data, enterprise_attack_filepath
 
 
-def test_multiple_embedding_dimensions(model_class: Recommender, method: PredictionMethod, training_data, validation_data, test_data, enterprise_attack_filepath, out_file: str, device=None, **kwargs):
+def test_multiple_embedding_dimensions(model_class: Type[Recommender], method: PredictionMethod, training_data, validation_data, test_data, enterprise_attack_filepath, out_file: str, device=None, **kwargs):
     """Runs model_class at multiple embedding dimensions and saves results (PyTorch refactor)."""
     assert len(out_file) > 0
     results = []
@@ -186,6 +205,7 @@ def test_multiple_embedding_dimensions(model_class: Recommender, method: Predict
     print(f"{model_class.__name__}: All embedding dimension sweeps complete. Saving results to {out_file}")
     results_dataframe = pd.DataFrame(results)
     results_dataframe.to_csv(out_file)
+    return results
 
 
 def make_tsne_embeddings(embeddings: np.ndarray):
@@ -218,10 +238,10 @@ def visualize_embeddings(tie):
     '''
     Visualize Embeddings
 
-    Because the model's reports exist in an embedding dimension greater than 4, it 
-    can be difficult to visualize how the reports are clustered. This cell uses the currently 
-    trained model (from section 4) to plot a 2-dimensional representation of the model's 
-    embeddings using t-SNE. In the chart below, reports that are far apart in the 4-dimensional 
+    Because the model's reports exist in an embedding dimension greater than 4, it
+    can be difficult to visualize how the reports are clustered. This cell uses the currently
+    trained model (from section 4) to plot a 2-dimensional representation of the model's
+    embeddings using t-SNE. In the chart below, reports that are far apart in the 4-dimensional
     space are similarly distant in the 2-dimensional space.
 
     If you wish to visualize how techniques are clustered (instead of reports), switch:
@@ -242,7 +262,7 @@ def visualize_embeddings(tie):
     plt.show()
 
 
-def run_experiment(model_class, method, training_data, validation_data, test_data, enterprise_attack_filepath, embedding_dimension, k, hyperparameters, label=None, device=None):
+def run_experiment(model_class: Type[Recommender], method, training_data, validation_data, test_data, enterprise_attack_filepath, embedding_dimension, k, hyperparameters, label=None, device=None):
     """
     Train and evaluate a single model (PyTorch refactor).
     """
@@ -405,7 +425,7 @@ def experiment_bpr(training_data, validation_data, test_data, enterprise_attack_
 
 def experiment_topitems(training_data, validation_data, test_data, enterprise_attack_filepath, device=None):
     """
-    Run Top Items Recommender experiment (PyTorch refactor). 
+    Run Top Items Recommender experiment (PyTorch refactor).
     The "Top Items" Recommender is a (naive) model that recommends Techniques in order of their frequency in the dataset.
 
     This model acts as a baseline and allows us to compare how other models perform against simply guessing the most popular ATT&CK Techniques.
@@ -739,6 +759,12 @@ def experiment_implicit_matrix_factorization_base(training_data, validation_data
         td = to_tensor(training_data)
         vd = to_tensor(validation_data)
         tsd = to_tensor(test_data)
+        if AlternatingLeastSquares is None:
+            print(
+                "[ImplicitMatrixFactorizationBase] GPU ALS backend unavailable ({exc}). Using CPU implementation.".format(
+                    exc=_IMPLICIT_GPU_IMPORT_ERROR
+                )
+            )
         model = ImplicitMatrixFactorizationBaseRecommender(
             m=training_data.m,
             n=training_data.n,
@@ -797,6 +823,7 @@ def main():
     # Timestamp for all metrics
     execution_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     device = get_device()
+    set_default_device(device)
     training_data, test_data, validation_data, enterprise_attack_filepath = load_data(device)
 
     if args.experiment == 'wals':
